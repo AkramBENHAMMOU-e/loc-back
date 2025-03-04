@@ -33,7 +33,7 @@ Thumbs.db
 *.swo
 
 # Uploaded files (if you're storing uploads locally)
-uploads/
+#uploads/
 
 # Optional: Temporary files
 tmp/
