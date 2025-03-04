@@ -13,7 +13,7 @@ const port = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(bodyParser.json());
-app.use('/uploads', express.static('uploads'));
+app.use('/uploads', express.static(process.env.UPLOAD_DIR || 'uploads'));
 
 
 // Fonction utilitaire pour réinitialiser les IDs dans une table
