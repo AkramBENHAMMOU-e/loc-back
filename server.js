@@ -126,6 +126,8 @@ app.get('/', (req, res) => {
     res.send('Luxury Drive API (SQLite) is running!');
 });
 
+
+
 // --- Cars Endpoints ---
 app.get('/api/cars', (req, res) => {
     db.all('SELECT * FROM cars', [], (err, rows) => {
@@ -138,36 +140,44 @@ app.get('/api/cars', (req, res) => {
     });
 });
 
+const cloudinary = require('cloudinary').v2;
+cloudinary.config({
+    cloud_name: 'dluqdzeml',
+    api_key: '982631744688698',
+    api_secret: 'obQzDBDjB8qswwwSKJtYbL7f-S4'
+});
+
 app.post('/api/cars', upload.single('image'), (req, res) => {
     const { name, brand, price, available, description, consumption, acceleration, puissance } = req.body;
     if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance) {
         return res.status(400).json({ error: 'All fields are required, including an image' });
     }
-    const customName = `${brand}_${name}`.replace(/\s+/g, '_').toLowerCase();
-    const fileExt = path.extname(req.file.originalname);
-    const finalFileName = `${customName}${fileExt}`;
-    const tempFilePath = req.file.path;
-    const newFilePath = path.join('uploads', finalFileName);
-    fs.renameSync(tempFilePath, newFilePath);
-    const imagePath = `uploads/${finalFileName}`;
-    db.run(
-        'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance],
-        function (err) {
-            if (err) {
-                console.error('Error adding car:', err);
-                res.status(500).json({ error: 'Failed to add car' });
-            } else {
-                db.get('SELECT * FROM cars WHERE id = ?', [this.lastID], (err, row) => {
-                    if (err) {
-                        res.status(500).json({ error: 'Failed to retrieve inserted car' });
-                    } else {
-                        res.status(201).json(row);
-                    }
-                });
-            }
+    cloudinary.uploader.upload(req.file.path, { folder: 'cars' }, (error, result) => {
+        if (error) {
+            console.error('Error uploading to Cloudinary:', error);
+            return res.status(500).json({ error: 'Failed to upload image' });
         }
-    );
+        const imagePath = result.secure_url; // URL Cloudinary
+        db.run(
+            'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance],
+            function (err) {
+                if (err) {
+                    console.error('Error adding car:', err);
+                    res.status(500).json({ error: 'Failed to add car' });
+                } else {
+                    db.get('SELECT * FROM cars WHERE id = ?', [this.lastID], (err, row) => {
+                        if (err) {
+                            res.status(500).json({ error: 'Failed to retrieve inserted car' });
+                        } else {
+                            res.status(201).json(row);
+                        }
+                    });
+                }
+            }
+        );
+        fs.unlinkSync(req.file.path); // Supprimer le fichier temporaire
+    });
 });
 
 app.put('/api/cars/:id', upload.single('image'), (req, res) => {
