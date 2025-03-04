@@ -6,9 +6,10 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs'); // Synchronous fs module
 const fsPromises = require('fs').promises; // Promise-based fs module
+require('dotenv').config();
 
 const app = express();
-const port = 5000;
+const port = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -70,17 +71,17 @@ async function resetAutoIncrement(tableName, pool) {
 
 // MySQL connection pool
 const pool = mysql.createPool({
-    host: 'localhost',
-    user: 'root',
-    password: 'root',
-    database: 'luxury_drive_db',
-    port: 3306,
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    port: parseInt(process.env.DB_PORT),
 });
 
 // Multer configuration
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        const dir = './uploads';
+        const dir = process.env.UPLOAD_DIR || './uploads';
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); // Use synchronous fs
         cb(null, dir);
     },
@@ -91,7 +92,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({
     storage,
-    limits: { fileSize: 10 * 1024 * 1024 },
+    limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
         const filetypes = /jpeg|jpg|png|gif/;
         const mimetype = filetypes.test(file.mimetype);
@@ -119,7 +120,7 @@ app.get('/api/cars', async (req, res) => {
 
 app.post('/api/cars', upload.single('image'), async (req, res) => {
     try {
-        const { name, brand, price, available, description, consumption, acceleration,puissance } = req.body;
+        const { name, brand, price, available, description, consumption, acceleration, puissance } = req.body;
         if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance) {
             return res.status(400).json({ error: 'All fields are required, including an image' });
         }
@@ -127,9 +128,9 @@ app.post('/api/cars', upload.single('image'), async (req, res) => {
         const fileExt = path.extname(req.file.originalname);
         const finalFileName = `${customName}${fileExt}`;
         const tempFilePath = req.file.path;
-        const newFilePath = path.join('uploads', finalFileName);
+        const newFilePath = path.join(process.env.UPLOAD_DIR || 'uploads', finalFileName);
         await fsPromises.rename(tempFilePath, newFilePath); // Use fsPromises.rename
-        const imagePath = `uploads/${finalFileName}`;
+        const imagePath = `${process.env.UPLOAD_DIR || 'uploads'}/${finalFileName}`;
         const [result] = await pool.query(
             'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance]
@@ -158,9 +159,9 @@ app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
             const fileExt = path.extname(req.file.originalname);
             const finalFileName = `${customName}${fileExt}`;
             const tempFilePath = req.file.path;
-            const newFilePath = path.join('uploads', finalFileName);
+            const newFilePath = path.join(process.env.UPLOAD_DIR || 'uploads', finalFileName);
             await fsPromises.rename(tempFilePath, newFilePath);
-            imagePath = `uploads/${finalFileName}`;
+            imagePath = `${process.env.UPLOAD_DIR || 'uploads'}/${finalFileName}`;
             
             const [oldImage] = await pool.query('SELECT image_url FROM cars WHERE id = ?', [id]);
             if (oldImage.length > 0 && oldImage[0].image_url && fs.existsSync(oldImage[0].image_url)) {
@@ -412,7 +413,16 @@ app.delete('/api/reservations/:id', async (req, res) => {
 app.get('/api/settings', async (req, res) => {
     try {
         const [rows] = await pool.query('SELECT * FROM settings WHERE id = 1');
-        res.json(rows[0] || { site_name: 'Luxury Drive',phone : '212000000', contact_email: 'admin@luxurydrive.com',facebook : 'facebook.com',instagram : 'instagram.com', adress :'adress',gps : 'gps', maintenance_mode: 0 });
+        res.json(rows[0] || { 
+            site_name: 'Luxury Drive',
+            phone: '212000000', 
+            contact_email: 'admin@luxurydrive.com',
+            facebook: 'facebook.com',
+            instagram: 'instagram.com', 
+            adress: 'adress',
+            gps: 'gps', 
+            maintenance_mode: 0 
+        });
     } catch (err) {
         console.error('Error fetching settings:', err);
         res.status(500).json({ error: 'Failed to fetch settings' });
@@ -422,9 +432,9 @@ app.get('/api/settings', async (req, res) => {
 // Update settings
 app.put('/api/settings', async (req, res) => {
     try {
-        const { site_name, phone, contact_email, facebook, instagram, adress,gps, maintenance_mode } = req.body;
+        const { site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode } = req.body;
         const [result] = await pool.query(
-            `INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress,gps, maintenance_mode)
+            `INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode)
              VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
              site_name = VALUES(site_name),
