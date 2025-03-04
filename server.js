@@ -8,10 +8,10 @@ const fs = require('fs');
 
 const app = express();
 
-
 // Middleware setup
 app.use(cors());
 app.use(bodyParser.json());
+// Serve uploads directory (optional, only if you still have local images to serve)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // SQLite database connection
@@ -97,7 +97,7 @@ const createTables = () => {
 };
 createTables();
 
-// Multer configuration for file uploads
+// Multer configuration for file uploads (temporary local storage before Cloudinary)
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const dir = './uploads';
@@ -111,7 +111,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({
     storage,
-    limits: { fileSize: 10 * 1024 * 1024 },
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
     fileFilter: (req, file, cb) => {
         const filetypes = /jpeg|jpg|png|gif/;
         const mimetype = filetypes.test(file.mimetype);
@@ -121,12 +121,18 @@ const upload = multer({
     },
 });
 
+// Cloudinary configuration
+const cloudinary = require('cloudinary').v2;
+cloudinary.config({
+    cloud_name: 'dluqdzeml',
+    api_key: '982631744688698',
+    api_secret: 'obQzDBDjB8qswwwSKJtYbL7f-S4'
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
     res.send('Luxury Drive API (SQLite) is running!');
 });
-
-
 
 // --- Cars Endpoints ---
 app.get('/api/cars', (req, res) => {
@@ -140,13 +146,7 @@ app.get('/api/cars', (req, res) => {
     });
 });
 
-const cloudinary = require('cloudinary').v2;
-cloudinary.config({
-    cloud_name: 'dluqdzeml',
-    api_key: '982631744688698',
-    api_secret: 'obQzDBDjB8qswwwSKJtYbL7f-S4'
-});
-
+// POST /api/cars - Add a new car with Cloudinary
 app.post('/api/cars', upload.single('image'), (req, res) => {
     const { name, brand, price, available, description, consumption, acceleration, puissance } = req.body;
     if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance) {
@@ -157,7 +157,7 @@ app.post('/api/cars', upload.single('image'), (req, res) => {
             console.error('Error uploading to Cloudinary:', error);
             return res.status(500).json({ error: 'Failed to upload image' });
         }
-        const imagePath = result.secure_url; // URL Cloudinary
+        const imagePath = result.secure_url; // Cloudinary URL
         db.run(
             'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance],
@@ -176,53 +176,73 @@ app.post('/api/cars', upload.single('image'), (req, res) => {
                 }
             }
         );
-        fs.unlinkSync(req.file.path); // Supprimer le fichier temporaire
+        fs.unlinkSync(req.file.path); // Clean up temporary file
     });
 });
 
+// PUT /api/cars/:id - Update a car with Cloudinary
 app.put('/api/cars/:id', upload.single('image'), (req, res) => {
     const id = req.params.id;
     const { name, brand, price, available, description, consumption, acceleration, vote, puissance } = req.body;
+
     if (!name || !brand || !price || available === undefined) {
         return res.status(400).json({ error: 'Name, brand, price, and available are required' });
     }
+
     db.get('SELECT image_url FROM cars WHERE id = ?', [id], (err, row) => {
         if (err) {
             console.error('Error fetching car:', err);
             return res.status(500).json({ error: 'Failed to update car' });
         }
         if (!row) return res.status(404).json({ error: 'Car not found' });
-        let imagePath = row.image_url;
+
+        const updateCarData = (imagePath) => {
+            db.run(
+                'UPDATE cars SET name = ?, brand = ?, price = ?, available = ?, image_url = ?, description = ?, consumption = ?, acceleration = ?, vote = ?, puissance = ? WHERE id = ?',
+                [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null, id],
+                function (err) {
+                    if (err) {
+                        console.error('Error updating car:', err);
+                        res.status(500).json({ error: 'Failed to update car' });
+                    } else if (this.changes === 0) {
+                        res.status(404).json({ error: 'Car not found' });
+                    } else {
+                        db.get('SELECT * FROM cars WHERE id = ?', [id], (err, updatedRow) => {
+                            if (err) {
+                                res.status(500).json({ error: 'Failed to retrieve updated car' });
+                            } else {
+                                res.json(updatedRow);
+                            }
+                        });
+                    }
+                }
+            );
+        };
+
         if (req.file) {
-            const customName = `${brand}_${name}`.replace(/\s+/g, '_').toLowerCase();
-            const fileExt = path.extname(req.file.originalname);
-            const finalFileName = `${customName}${fileExt}`;
-            const tempFilePath = req.file.path;
-            const newFilePath = path.join('uploads', finalFileName);
-            fs.renameSync(tempFilePath, newFilePath);
-            imagePath = `uploads/${finalFileName}`;
-            if (row.image_url && fs.existsSync(row.image_url)) fs.unlinkSync(row.image_url);
-        }
-        db.run(
-            'UPDATE cars SET name = ?, brand = ?, price = ?, available = ?, image_url = ?, description = ?, consumption = ?, acceleration = ?, vote = ?, puissance = ? WHERE id = ?',
-            [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null, id],
-            function (err) {
-                if (err) {
-                    console.error('Error updating car:', err);
-                    res.status(500).json({ error: 'Failed to update car' });
-                } else if (this.changes === 0) {
-                    res.status(404).json({ error: 'Car not found' });
-                } else {
-                    db.get('SELECT * FROM cars WHERE id = ?', [id], (err, updatedRow) => {
-                        if (err) {
-                            res.status(500).json({ error: 'Failed to retrieve updated car' });
-                        } else {
-                            res.json(updatedRow);
-                        }
+            // Upload new image to Cloudinary
+            cloudinary.uploader.upload(req.file.path, { folder: 'cars' }, (error, result) => {
+                if (error) {
+                    console.error('Error uploading to Cloudinary:', error);
+                    return res.status(500).json({ error: 'Failed to upload image' });
+                }
+                const newImagePath = result.secure_url;
+
+                // Optionally delete the old image from Cloudinary if it exists and is a Cloudinary URL
+                if (row.image_url && row.image_url.startsWith('https://res.cloudinary.com')) {
+                    const publicId = row.image_url.split('/').slice(-1)[0].split('.')[0]; // Extract public ID
+                    cloudinary.uploader.destroy(`cars/${publicId}`, (deleteErr) => {
+                        if (deleteErr) console.error('Error deleting old image from Cloudinary:', deleteErr);
                     });
                 }
-            }
-        );
+
+                updateCarData(newImagePath);
+                fs.unlinkSync(req.file.path); // Clean up temporary file
+            });
+        } else {
+            // No new image uploaded, keep the existing image_url
+            updateCarData(row.image_url);
+        }
     });
 });
 
@@ -234,6 +254,8 @@ app.delete('/api/cars/:id', (req, res) => {
             return res.status(500).json({ error: 'Failed to delete car' });
         }
         if (!row) return res.status(404).json({ error: 'Car not found' });
+
+        // Delete from reservations first due to foreign key constraint
         db.run('DELETE FROM reservations WHERE car_id = ?', [id], (err) => {
             if (err) {
                 console.error('Error deleting reservations:', err);
@@ -244,7 +266,13 @@ app.delete('/api/cars/:id', (req, res) => {
                     console.error('Error deleting car:', err);
                     res.status(500).json({ error: 'Failed to delete car' });
                 } else {
-                    if (row.image_url && fs.existsSync(row.image_url)) fs.unlinkSync(row.image_url);
+                    // Delete image from Cloudinary if it exists
+                    if (row.image_url && row.image_url.startsWith('https://res.cloudinary.com')) {
+                        const publicId = row.image_url.split('/').slice(-1)[0].split('.')[0];
+                        cloudinary.uploader.destroy(`cars/${publicId}`, (deleteErr) => {
+                            if (deleteErr) console.error('Error deleting image from Cloudinary:', deleteErr);
+                        });
+                    }
                     res.json({ message: 'Car deleted successfully', deletedCar: { id } });
                 }
             });
