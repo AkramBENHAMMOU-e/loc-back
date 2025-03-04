@@ -7,7 +7,7 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const port = 5000;
+
 
 // Middleware setup
 app.use(cors());
@@ -624,6 +624,7 @@ app.delete('/api/testimonials/:id', (req, res) => {
 });
 
 // Start the server
+const port = process.env.PORT || 5000;
 app.listen(port, () => {
     console.log(`Server listening on port ${port} (SQLite)`);
 });
