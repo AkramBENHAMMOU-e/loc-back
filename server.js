@@ -1,679 +1,483 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const cloudinary = require('cloudinary').v2;
 
 const app = express();
 
-// Middleware setup
+// Middleware
 app.use(cors());
 app.use(bodyParser.json());
-// Serve uploads directory (optional, only if you still have local images to serve)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// SQLite database connection
-const db = new sqlite3.Database('./luxury_drive.db', (err) => {
-    if (err) {
-        console.error('Error opening database:', err);
-    } else {
-        console.log('Connected to the SQLite database.');
-    }
+// Connexion à Neon (PostgreSQL)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL, // L’URL sera définie dans Render
+  ssl: { rejectUnauthorized: false }, // Nécessaire pour Neon
 });
 
-// Enable foreign key support
-db.serialize(() => {
-    db.run('PRAGMA foreign_keys = ON;');
+// Configuration Cloudinary
+cloudinary.config({
+  cloud_name: 'dluqdzeml',
+  api_key: '982631744688698',
+  api_secret: 'obQzDBDjB8qswwwSKJtYbL7f-S4',
 });
 
-// Create tables
-const createTables = () => {
-    db.serialize(() => {
-        db.run(`
-            CREATE TABLE IF NOT EXISTS cars (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                brand TEXT NOT NULL,
-                price REAL NOT NULL,
-                available INTEGER NOT NULL,
-                image_url TEXT,
-                description TEXT,
-                acceleration TEXT,
-                consumption TEXT,
-                puissance TEXT,
-                reservations_count INTEGER DEFAULT 0,
-                vote INTEGER DEFAULT 0
-            )
-        `);
-        db.run(`
-            CREATE TABLE IF NOT EXISTS customers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                phone TEXT NOT NULL,
-                email TEXT,
-                reservations_count INTEGER DEFAULT 0,
-                total_spent REAL DEFAULT 0
-            )
-        `);
-        db.run(`
-            CREATE TABLE IF NOT EXISTS reservations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_id INTEGER NOT NULL,
-                car_id INTEGER NOT NULL,
-                start_date TEXT NOT NULL,
-                end_date TEXT NOT NULL,
-                total REAL NOT NULL,
-                status TEXT NOT NULL,
-                FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
-                FOREIGN KEY (car_id) REFERENCES cars(id) ON DELETE CASCADE
-            )
-        `);
-        db.run(`
-            CREATE TABLE IF NOT EXISTS settings (
-                id INTEGER PRIMARY KEY,
-                site_name TEXT,
-                phone TEXT,
-                contact_email TEXT,
-                facebook TEXT,
-                instagram TEXT,
-                adress TEXT,
-                gps TEXT,
-                maintenance_mode INTEGER
-            )
-        `);
-        db.run(`
-            CREATE TABLE IF NOT EXISTS testimonials (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                rating INTEGER NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-    });
+// Création des tables dans Neon
+const createTables = async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cars (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        brand TEXT NOT NULL,
+        price REAL NOT NULL,
+        available INTEGER NOT NULL,
+        image_url TEXT,
+        description TEXT,
+        acceleration TEXT,
+        consumption TEXT,
+        puissance TEXT,
+        reservations_count INTEGER DEFAULT 0,
+        vote INTEGER DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS customers (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        email TEXT,
+        reservations_count INTEGER DEFAULT 0,
+        total_spent REAL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS reservations (
+        id SERIAL PRIMARY KEY,
+        customer_id INTEGER NOT NULL,
+        car_id INTEGER NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        total REAL NOT NULL,
+        status TEXT NOT NULL,
+        FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
+        FOREIGN KEY (car_id) REFERENCES cars(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS settings (
+        id INTEGER PRIMARY KEY,
+        site_name TEXT,
+        phone TEXT,
+        contact_email TEXT,
+        facebook TEXT,
+        instagram TEXT,
+        adress TEXT,
+        gps TEXT,
+        maintenance_mode INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS testimonials (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        rating INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('Tables créées avec succès dans Neon.');
+  } catch (err) {
+    console.error('Erreur lors de la création des tables :', err);
+  }
 };
 createTables();
 
-// Multer configuration for file uploads (temporary local storage before Cloudinary)
+// Multer pour les uploads d’images
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const dir = './uploads';
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        cb(null, dir);
-    },
-    filename: (req, file, cb) => {
-        const tempFilename = `temp_${Date.now()}${path.extname(file.originalname)}`;
-        cb(null, tempFilename);
-    },
+  destination: (req, file, cb) => {
+    const dir = './uploads';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `temp_${Date.now()}${path.extname(file.originalname)}`);
+  },
 });
 const upload = multer({
-    storage,
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
-    fileFilter: (req, file, cb) => {
-        const filetypes = /jpeg|jpg|png|gif/;
-        const mimetype = filetypes.test(file.mimetype);
-        const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-        if (mimetype && extname) return cb(null, true);
-        cb(new Error('Only images are allowed (jpeg, jpg, png, gif)'));
-    },
-});
-
-// Cloudinary configuration
-const cloudinary = require('cloudinary').v2;
-cloudinary.config({
-    cloud_name: 'dluqdzeml',
-    api_key: '982631744688698',
-    api_secret: 'obQzDBDjB8qswwwSKJtYbL7f-S4'
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const filetypes = /jpeg|jpg|png|gif/;
+    if (filetypes.test(file.mimetype) && filetypes.test(path.extname(file.originalname).toLowerCase())) {
+      cb(null, true);
+    } else {
+      cb(new Error('Seules les images sont autorisées (jpeg, jpg, png, gif)'));
+    }
+  },
 });
 
 // Root endpoint
 app.get('/', (req, res) => {
-    res.send('Luxury Drive API (SQLite) is running!');
+  res.send('Luxury Drive API (Neon PostgreSQL) is running!');
 });
 
 // --- Cars Endpoints ---
-app.get('/api/cars', (req, res) => {
-    db.all('SELECT * FROM cars', [], (err, rows) => {
-        if (err) {
-            console.error('Error fetching cars:', err);
-            res.status(500).json({ error: 'Failed to fetch cars' });
-        } else {
-            res.json(rows);
-        }
-    });
+app.get('/api/cars', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM cars');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Erreur lors de la récupération des voitures :', err);
+    res.status(500).json({ error: 'Échec de la récupération des voitures' });
+  }
 });
 
-// POST /api/cars - Add a new car with Cloudinary
-app.post('/api/cars', upload.single('image'), (req, res) => {
-    const { name, brand, price, available, description, consumption, acceleration, puissance } = req.body;
-    if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance) {
-        return res.status(400).json({ error: 'All fields are required, including an image' });
-    }
-    cloudinary.uploader.upload(req.file.path, { folder: 'cars' }, (error, result) => {
-        if (error) {
-            console.error('Error uploading to Cloudinary:', error);
-            return res.status(500).json({ error: 'Failed to upload image' });
-        }
-        const imagePath = result.secure_url; // Cloudinary URL
-        db.run(
-            'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance],
-            function (err) {
-                if (err) {
-                    console.error('Error adding car:', err);
-                    res.status(500).json({ error: 'Failed to add car' });
-                } else {
-                    db.get('SELECT * FROM cars WHERE id = ?', [this.lastID], (err, row) => {
-                        if (err) {
-                            res.status(500).json({ error: 'Failed to retrieve inserted car' });
-                        } else {
-                            res.status(201).json(row);
-                        }
-                    });
-                }
-            }
-        );
-        fs.unlinkSync(req.file.path); // Clean up temporary file
-    });
+app.post('/api/cars', upload.single('image'), async (req, res) => {
+  const { name, brand, price, available, description, consumption, acceleration, puissance } = req.body;
+  if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance) {
+    return res.status(400).json({ error: 'Tous les champs sont requis, y compris une image' });
+  }
+  try {
+    const result = await cloudinary.uploader.upload(req.file.path, { folder: 'cars' });
+    const imagePath = result.secure_url;
+    const { rows } = await pool.query(
+      'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
+      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance]
+    );
+    res.status(201).json(rows[0]);
+    fs.unlinkSync(req.file.path); // Supprime le fichier temporaire
+  } catch (err) {
+    console.error('Erreur lors de l’ajout de la voiture :', err);
+    res.status(500).json({ error: 'Échec de l’ajout de la voiture' });
+  }
 });
 
-// PUT /api/cars/:id - Update a car with Cloudinary
-app.put('/api/cars/:id', upload.single('image'), (req, res) => {
-    const id = req.params.id;
-    const { name, brand, price, available, description, consumption, acceleration, vote, puissance } = req.body;
+app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
+  const id = req.params.id;
+  const { name, brand, price, available, description, consumption, acceleration, vote, puissance } = req.body;
+  if (!name || !brand || !price || available === undefined) {
+    return res.status(400).json({ error: 'Nom, marque, prix et disponibilité sont requis' });
+  }
+  try {
+    const carResult = await pool.query('SELECT image_url FROM cars WHERE id = $1', [id]);
+    if (carResult.rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
+    const oldImageUrl = carResult.rows[0].image_url;
 
-    if (!name || !brand || !price || available === undefined) {
-        return res.status(400).json({ error: 'Name, brand, price, and available are required' });
+    let imagePath = oldImageUrl;
+    if (req.file) {
+      const uploadResult = await cloudinary.uploader.upload(req.file.path, { folder: 'cars' });
+      imagePath = uploadResult.secure_url;
+      if (oldImageUrl && oldImageUrl.startsWith('https://res.cloudinary.com')) {
+        const publicId = oldImageUrl.split('/').slice(-1)[0].split('.')[0];
+        cloudinary.uploader.destroy(`cars/${publicId}`).catch(err => console.error('Erreur suppression ancienne image :', err));
+      }
+      fs.unlinkSync(req.file.path);
     }
 
-    db.get('SELECT image_url FROM cars WHERE id = ?', [id], (err, row) => {
-        if (err) {
-            console.error('Error fetching car:', err);
-            return res.status(500).json({ error: 'Failed to update car' });
-        }
-        if (!row) return res.status(404).json({ error: 'Car not found' });
-
-        const updateCarData = (imagePath) => {
-            db.run(
-                'UPDATE cars SET name = ?, brand = ?, price = ?, available = ?, image_url = ?, description = ?, consumption = ?, acceleration = ?, vote = ?, puissance = ? WHERE id = ?',
-                [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null, id],
-                function (err) {
-                    if (err) {
-                        console.error('Error updating car:', err);
-                        res.status(500).json({ error: 'Failed to update car' });
-                    } else if (this.changes === 0) {
-                        res.status(404).json({ error: 'Car not found' });
-                    } else {
-                        db.get('SELECT * FROM cars WHERE id = ?', [id], (err, updatedRow) => {
-                            if (err) {
-                                res.status(500).json({ error: 'Failed to retrieve updated car' });
-                            } else {
-                                res.json(updatedRow);
-                            }
-                        });
-                    }
-                }
-            );
-        };
-
-        if (req.file) {
-            // Upload new image to Cloudinary
-            cloudinary.uploader.upload(req.file.path, { folder: 'cars' }, (error, result) => {
-                if (error) {
-                    console.error('Error uploading to Cloudinary:', error);
-                    return res.status(500).json({ error: 'Failed to upload image' });
-                }
-                const newImagePath = result.secure_url;
-
-                // Optionally delete the old image from Cloudinary if it exists and is a Cloudinary URL
-                if (row.image_url && row.image_url.startsWith('https://res.cloudinary.com')) {
-                    const publicId = row.image_url.split('/').slice(-1)[0].split('.')[0]; // Extract public ID
-                    cloudinary.uploader.destroy(`cars/${publicId}`, (deleteErr) => {
-                        if (deleteErr) console.error('Error deleting old image from Cloudinary:', deleteErr);
-                    });
-                }
-
-                updateCarData(newImagePath);
-                fs.unlinkSync(req.file.path); // Clean up temporary file
-            });
-        } else {
-            // No new image uploaded, keep the existing image_url
-            updateCarData(row.image_url);
-        }
-    });
+    const { rows } = await pool.query(
+      'UPDATE cars SET name = $1, brand = $2, price = $3, available = $4, image_url = $5, description = $6, consumption = $7, acceleration = $8, vote = $9, puissance = $10 WHERE id = $11 RETURNING *',
+      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null, id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erreur lors de la mise à jour de la voiture :', err);
+    res.status(500).json({ error: 'Échec de la mise à jour de la voiture' });
+  }
 });
 
-app.delete('/api/cars/:id', (req, res) => {
-    const id = req.params.id;
-    db.get('SELECT image_url FROM cars WHERE id = ?', [id], (err, row) => {
-        if (err) {
-            console.error('Error fetching car:', err);
-            return res.status(500).json({ error: 'Failed to delete car' });
-        }
-        if (!row) return res.status(404).json({ error: 'Car not found' });
+app.delete('/api/cars/:id', async (req, res) => {
+  const id = req.params.id;
+  try {
+    const carResult = await pool.query('SELECT image_url FROM cars WHERE id = $1', [id]);
+    if (carResult.rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
+    const imageUrl = carResult.rows[0].image_url;
 
-        // Delete from reservations first due to foreign key constraint
-        db.run('DELETE FROM reservations WHERE car_id = ?', [id], (err) => {
-            if (err) {
-                console.error('Error deleting reservations:', err);
-                return res.status(500).json({ error: 'Failed to delete related reservations' });
-            }
-            db.run('DELETE FROM cars WHERE id = ?', [id], function (err) {
-                if (err) {
-                    console.error('Error deleting car:', err);
-                    res.status(500).json({ error: 'Failed to delete car' });
-                } else {
-                    // Delete image from Cloudinary if it exists
-                    if (row.image_url && row.image_url.startsWith('https://res.cloudinary.com')) {
-                        const publicId = row.image_url.split('/').slice(-1)[0].split('.')[0];
-                        cloudinary.uploader.destroy(`cars/${publicId}`, (deleteErr) => {
-                            if (deleteErr) console.error('Error deleting image from Cloudinary:', deleteErr);
-                        });
-                    }
-                    res.json({ message: 'Car deleted successfully', deletedCar: { id } });
-                }
-            });
-        });
-    });
+    await pool.query('DELETE FROM reservations WHERE car_id = $1', [id]);
+    await pool.query('DELETE FROM cars WHERE id = $1', [id]);
+
+    if (imageUrl && imageUrl.startsWith('https://res.cloudinary.com')) {
+      const publicId = imageUrl.split('/').slice(-1)[0].split('.')[0];
+      cloudinary.uploader.destroy(`cars/${publicId}`).catch(err => console.error('Erreur suppression image :', err));
+    }
+    res.json({ message: 'Voiture supprimée avec succès', deletedCar: { id } });
+  } catch (err) {
+    console.error('Erreur lors de la suppression de la voiture :', err);
+    res.status(500).json({ error: 'Échec de la suppression de la voiture' });
+  }
 });
 
 // --- Customers Endpoints ---
-app.get('/api/customers', (req, res) => {
-    db.all('SELECT * FROM customers', [], (err, rows) => {
-        if (err) {
-            console.error('Error fetching customers:', err);
-            res.status(500).json({ error: 'Failed to fetch customers' });
-        } else {
-            res.json(rows);
-        }
-    });
+app.get('/api/customers', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM customers');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Erreur lors de la récupération des clients :', err);
+    res.status(500).json({ error: 'Échec de la récupération des clients' });
+  }
 });
 
-app.post('/api/customers', (req, res) => {
-    const { name, phone, email } = req.body;
-    if (!name || !phone) return res.status(400).json({ error: 'Name and phone are required' });
-    db.run(
-        'INSERT INTO customers (name, phone, email) VALUES (?, ?, ?)',
-        [name, phone, email || null],
-        function (err) {
-            if (err) {
-                console.error('Error adding customer:', err);
-                res.status(500).json({ error: 'Failed to add customer' });
-            } else {
-                db.get('SELECT * FROM customers WHERE id = ?', [this.lastID], (err, row) => {
-                    if (err) {
-                        res.status(500).json({ error: 'Failed to retrieve inserted customer' });
-                    } else {
-                        res.status(201).json(row);
-                    }
-                });
-            }
-        }
+app.post('/api/customers', async (req, res) => {
+  const { name, phone, email } = req.body;
+  if (!name || !phone) return res.status(400).json({ error: 'Nom et téléphone sont requis' });
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO customers (name, phone, email) VALUES ($1, $2, $3) RETURNING *',
+      [name, phone, email || null]
     );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('Erreur lors de l’ajout du client :', err);
+    res.status(500).json({ error: 'Échec de l’ajout du client' });
+  }
 });
 
-app.put('/api/customers/:id', (req, res) => {
-    const id = req.params.id;
-    const { name, phone, email } = req.body;
-    if (!name || !phone) return res.status(400).json({ error: 'Name and phone are required' });
-    db.run(
-        'UPDATE customers SET name = ?, phone = ?, email = ? WHERE id = ?',
-        [name, phone, email || null, id],
-        function (err) {
-            if (err) {
-                console.error('Error updating customer:', err);
-                res.status(500).json({ error: 'Failed to update customer' });
-            } else if (this.changes === 0) {
-                res.status(404).json({ error: 'Customer not found' });
-            } else {
-                db.get('SELECT * FROM customers WHERE id = ?', [id], (err, row) => {
-                    if (err) {
-                        res.status(500).json({ error: 'Failed to retrieve updated customer' });
-                    } else {
-                        res.json(row);
-                    }
-                });
-            }
-        }
+app.put('/api/customers/:id', async (req, res) => {
+  const id = req.params.id;
+  const { name, phone, email } = req.body;
+  if (!name || !phone) return res.status(400).json({ error: 'Nom et téléphone sont requis' });
+  try {
+    const { rows } = await pool.query(
+      'UPDATE customers SET name = $1, phone = $2, email = $3 WHERE id = $4 RETURNING *',
+      [name, phone, email || null, id]
     );
+    if (rows.length === 0) return res.status(404).json({ error: 'Client non trouvé' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erreur lors de la mise à jour du client :', err);
+    res.status(500).json({ error: 'Échec de la mise à jour du client' });
+  }
 });
 
-app.delete('/api/customers/:id', (req, res) => {
-    const id = req.params.id;
-    db.run('DELETE FROM reservations WHERE customer_id = ?', [id], (err) => {
-        if (err) {
-            console.error('Error deleting reservations:', err);
-            return res.status(500).json({ error: 'Failed to delete related reservations' });
-        }
-        db.run('DELETE FROM customers WHERE id = ?', [id], function (err) {
-            if (err) {
-                console.error('Error deleting customer:', err);
-                res.status(500).json({ error: 'Failed to delete customer' });
-            } else if (this.changes === 0) {
-                res.status(404).json({ error: 'Customer not found' });
-            } else {
-                res.json({ message: 'Customer deleted successfully', deletedCustomer: { id } });
-            }
-        });
-    });
+app.delete('/api/customers/:id', async (req, res) => {
+  const id = req.params.id;
+  try {
+    await pool.query('DELETE FROM reservations WHERE customer_id = $1', [id]);
+    const { rowCount } = await pool.query('DELETE FROM customers WHERE id = $1', [id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Client non trouvé' });
+    res.json({ message: 'Client supprimé avec succès', deletedCustomer: { id } });
+  } catch (err) {
+    console.error('Erreur lors de la suppression du client :', err);
+    res.status(500).json({ error: 'Échec de la suppression du client' });
+  }
 });
 
 // --- Reservations Endpoints ---
-app.get('/api/reservations', (req, res) => {
-    db.all(`
-        SELECT r.*, c.name AS customer_name, c.phone AS customer_phone, ca.name AS car_name, ca.price AS car_price
-        FROM reservations r
-        JOIN customers c ON r.customer_id = c.id
-        JOIN cars ca ON r.car_id = ca.id
-    `, [], (err, rows) => {
-        if (err) {
-            console.error('Error fetching reservations:', err);
-            res.status(500).json({ error: 'Failed to fetch reservations' });
-        } else {
-            res.json(rows);
-        }
-    });
+app.get('/api/reservations', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT r.*, c.name AS customer_name, c.phone AS customer_phone, ca.name AS car_name, ca.price AS car_price
+      FROM reservations r
+      JOIN customers c ON r.customer_id = c.id
+      JOIN cars ca ON r.car_id = ca.id
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Erreur lors de la récupération des réservations :', err);
+    res.status(500).json({ error: 'Échec de la récupération des réservations' });
+  }
 });
 
-app.post('/api/reservations', (req, res) => {
-    const { customer_id, car_id, start_date, end_date, status } = req.body;
-    if (!customer_id || !car_id || !start_date || !end_date) {
-        return res.status(400).json({ error: 'Customer ID, Car ID, start date, and end date are required' });
+app.post('/api/reservations', async (req, res) => {
+  const { customer_id, car_id, start_date, end_date, status } = req.body;
+  if (!customer_id || !car_id || !start_date || !end_date) {
+    return res.status(400).json({ error: 'ID client, ID voiture, date de début et date de fin sont requis' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const carResult = await client.query('SELECT price, available FROM cars WHERE id = $1', [car_id]);
+    if (carResult.rows.length === 0) throw new Error('Voiture non trouvée');
+    const car = carResult.rows[0];
+    if (!car.available) throw new Error('La voiture n’est pas disponible');
+
+    const days = Math.ceil((new Date(end_date) - new Date(start_date)) / (1000 * 60 * 60 * 24));
+    const total = car.price * days;
+
+    const reservationResult = await client.query(
+      'INSERT INTO reservations (customer_id, car_id, start_date, end_date, total, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [customer_id, car_id, start_date, end_date, total, status || 'pending']
+    );
+    await client.query('UPDATE cars SET available = 0, reservations_count = reservations_count + 1 WHERE id = $1', [car_id]);
+    await client.query(
+      'UPDATE customers SET reservations_count = reservations_count + 1, total_spent = total_spent + $1 WHERE id = $2',
+      [total, customer_id]
+    );
+    await client.query('COMMIT');
+    res.status(201).json(reservationResult.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Erreur lors de l’ajout de la réservation :', err);
+    res.status(500).json({ error: err.message || 'Échec de l’ajout de la réservation' });
+  } finally {
+    client.release();
+  }
+});
+
+app.put('/api/reservations/:id', async (req, res) => {
+  const id = req.params.id;
+  const { customer_id, car_id, start_date, end_date, status } = req.body;
+  if (!customer_id || !car_id || !start_date || !end_date) {
+    return res.status(400).json({ error: 'ID client, ID voiture, date de début et date de fin sont requis' });
+  }
+  try {
+    const carResult = await pool.query('SELECT price FROM cars WHERE id = $1', [car_id]);
+    if (carResult.rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
+    const days = Math.ceil((new Date(end_date) - new Date(start_date)) / (1000 * 60 * 60 * 24));
+    const total = carResult.rows[0].price * days;
+
+    const { rows } = await pool.query(
+      'UPDATE reservations SET customer_id = $1, car_id = $2, start_date = $3, end_date = $4, total = $5, status = $6 WHERE id = $7 RETURNING *',
+      [customer_id, car_id, start_date, end_date, total, status || 'pending', id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Réservation non trouvée' });
+
+    if (status === 'completed' || status === 'canceled') {
+      await pool.query('UPDATE cars SET available = 1 WHERE id = $1', [car_id]);
+    } else if (status === 'active' || status === 'pending') {
+      await pool.query('UPDATE cars SET available = 0 WHERE id = $1', [car_id]);
     }
-    db.serialize(() => {
-        db.run('BEGIN TRANSACTION');
-        db.get('SELECT price, available FROM cars WHERE id = ?', [car_id], (err, car) => {
-            if (err) {
-                db.run('ROLLBACK');
-                console.error('Error fetching car:', err);
-                return res.status(500).json({ error: 'Failed to add reservation' });
-            }
-            if (!car) {
-                db.run('ROLLBACK');
-                return res.status(404).json({ error: 'Car not found' });
-            }
-            if (!car.available) {
-                db.run('ROLLBACK');
-                return res.status(400).json({ error: 'Car is not available' });
-            }
-            const days = Math.ceil((new Date(end_date) - new Date(start_date)) / (1000 * 60 * 60 * 24));
-            const total = car.price * days;
-            db.run(
-                'INSERT INTO reservations (customer_id, car_id, start_date, end_date, total, status) VALUES (?, ?, ?, ?, ?, ?)',
-                [customer_id, car_id, start_date, end_date, total, status || 'pending'],
-                function (err) {
-                    if (err) {
-                        db.run('ROLLBACK');
-                        console.error('Error inserting reservation:', err);
-                        res.status(500).json({ error: 'Failed to add reservation' });
-                    } else {
-                        const reservationId = this.lastID;
-                        db.run('UPDATE cars SET available = 0, reservations_count = reservations_count + 1 WHERE id = ?', [car_id], (err) => {
-                            if (err) {
-                                db.run('ROLLBACK');
-                                console.error('Error updating car:', err);
-                                res.status(500).json({ error: 'Failed to add reservation' });
-                            } else {
-                                db.run(
-                                    'UPDATE customers SET reservations_count = reservations_count + 1, total_spent = total_spent + ? WHERE id = ?',
-                                    [total, customer_id],
-                                    (err) => {
-                                        if (err) {
-                                            db.run('ROLLBACK');
-                                            console.error('Error updating customer:', err);
-                                            res.status(500).json({ error: 'Failed to add reservation' });
-                                        } else {
-                                            db.run('COMMIT');
-                                            db.get('SELECT * FROM reservations WHERE id = ?', [reservationId], (err, row) => {
-                                                if (err) {
-                                                    res.status(500).json({ error: 'Failed to retrieve inserted reservation' });
-                                                } else {
-                                                    res.status(201).json(row);
-                                                }
-                                            });
-                                        }
-                                    }
-                                );
-                            }
-                        });
-                    }
-                }
-            );
-        });
-    });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erreur lors de la mise à jour de la réservation :', err);
+    res.status(500).json({ error: 'Échec de la mise à jour de la réservation' });
+  }
 });
 
-app.put('/api/reservations/:id', (req, res) => {
-    const id = req.params.id;
-    const { customer_id, car_id, start_date, end_date, status } = req.body;
-    if (!customer_id || !car_id || !start_date || !end_date) {
-        return res.status(400).json({ error: 'Customer ID, Car ID, start date, and end date are required' });
-    }
-    db.get('SELECT price FROM cars WHERE id = ?', [car_id], (err, car) => {
-        if (err) {
-            console.error('Error fetching car:', err);
-            return res.status(500).json({ error: 'Failed to update reservation' });
-        }
-        if (!car) return res.status(404).json({ error: 'Car not found' });
-        const days = Math.ceil((new Date(end_date) - new Date(start_date)) / (1000 * 60 * 60 * 24));
-        const total = car.price * days;
-        db.run(
-            'UPDATE reservations SET customer_id = ?, car_id = ?, start_date = ?, end_date = ?, total = ?, status = ? WHERE id = ?',
-            [customer_id, car_id, start_date, end_date, total, status || 'pending', id],
-            function (err) {
-                if (err) {
-                    console.error('Error updating reservation:', err);
-                    res.status(500).json({ error: 'Failed to update reservation' });
-                } else if (this.changes === 0) {
-                    res.status(404).json({ error: 'Reservation not found' });
-                } else {
-                    if (status === 'completed' || status === 'canceled') {
-                        db.run('UPDATE cars SET available = 1 WHERE id = ?', [car_id], (err) => {
-                            if (err) console.error('Error updating car availability:', err);
-                        });
-                    } else if (status === 'active' || status === 'pending') {
-                        db.run('UPDATE cars SET available = 0 WHERE id = ?', [car_id], (err) => {
-                            if (err) console.error('Error updating car availability:', err);
-                        });
-                    }
-                    db.get('SELECT * FROM reservations WHERE id = ?', [id], (err, row) => {
-                        if (err) {
-                            res.status(500).json({ error: 'Failed to retrieve updated reservation' });
-                        } else {
-                            res.json(row);
-                        }
-                    });
-                }
-            }
-        );
-    });
-});
+app.delete('/api/reservations/:id', async (req, res) => {
+  const id = req.params.id;
+  try {
+    const reservationResult = await pool.query('SELECT car_id, total, customer_id FROM reservations WHERE id = $1', [id]);
+    if (reservationResult.rows.length === 0) return res.status(404).json({ error: 'Réservation non trouvée' });
+    const { car_id, total, customer_id } = reservationResult.rows[0];
 
-app.delete('/api/reservations/:id', (req, res) => {
-    const id = req.params.id;
-    db.get('SELECT car_id, total, customer_id FROM reservations WHERE id = ?', [id], (err, reservation) => {
-        if (err) {
-            console.error('Error fetching reservation:', err);
-            return res.status(500).json({ error: 'Failed to delete reservation' });
-        }
-        if (!reservation) return res.status(404).json({ error: 'Reservation not found' });
-        db.run('DELETE FROM reservations WHERE id = ?', [id], function (err) {
-            if (err) {
-                console.error('Error deleting reservation:', err);
-                res.status(500).json({ error: 'Failed to delete reservation' });
-            } else {
-                db.run('UPDATE cars SET available = 1, reservations_count = reservations_count - 1 WHERE id = ?', [reservation.car_id], (err) => {
-                    if (err) console.error('Error updating car:', err);
-                    db.run(
-                        'UPDATE customers SET reservations_count = reservations_count - 1, total_spent = total_spent - ? WHERE id = ?',
-                        [reservation.total, reservation.customer_id],
-                        (err) => {
-                            if (err) console.error('Error updating customer:', err);
-                            res.json({ message: 'Reservation deleted successfully', deletedReservation: { id } });
-                        }
-                    );
-                });
-            }
-        });
-    });
+    await pool.query('DELETE FROM reservations WHERE id = $1', [id]);
+    await pool.query('UPDATE cars SET available = 1, reservations_count = reservations_count - 1 WHERE id = $1', [car_id]);
+    await pool.query(
+      'UPDATE customers SET reservations_count = reservations_count - 1, total_spent = total_spent - $1 WHERE id = $2',
+      [total, customer_id]
+    );
+    res.json({ message: 'Réservation supprimée avec succès', deletedReservation: { id } });
+  } catch (err) {
+    console.error('Erreur lors de la suppression de la réservation :', err);
+    res.status(500).json({ error: 'Échec de la suppression de la réservation' });
+  }
 });
 
 // --- Settings Endpoints ---
-app.get('/api/settings', (req, res) => {
-    db.get('SELECT * FROM settings WHERE id = 1', (err, row) => {
-        if (err) {
-            console.error('Error fetching settings:', err);
-            res.status(500).json({ error: 'Failed to fetch settings' });
-        } else {
-            res.json(row || { site_name: 'Luxury Drive', phone: '212000000', contact_email: 'admin@luxurydrive.com', facebook: 'facebook.com', instagram: 'instagram.com', adress: 'adress', gps: 'gps', maintenance_mode: 0 });
-        }
-    });
+app.get('/api/settings', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM settings WHERE id = 1');
+    if (result.rows.length === 0) {
+      return res.json({
+        site_name: 'Luxury Drive',
+        phone: '212000000',
+        contact_email: 'admin@luxurydrive.com',
+        facebook: 'facebook.com',
+        instagram: 'instagram.com',
+        adress: 'adress',
+        gps: 'gps',
+        maintenance_mode: 0,
+      });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Erreur lors de la récupération des paramètres :', err);
+    res.status(500).json({ error: 'Échec de la récupération des paramètres' });
+  }
 });
 
-app.put('/api/settings', (req, res) => {
-    const { site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode } = req.body;
-    db.get('SELECT * FROM settings WHERE id = 1', (err, row) => {
-        if (err) {
-            console.error('Error checking settings:', err);
-            return res.status(500).json({ error: 'Failed to update settings' });
-        }
-        if (row) {
-            db.run(
-                `UPDATE settings SET site_name = ?, phone = ?, contact_email = ?, facebook = ?, instagram = ?, adress = ?, gps = ?, maintenance_mode = ? WHERE id = 1`,
-                [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0],
-                function (err) {
-                    if (err) {
-                        console.error('Error updating settings:', err);
-                        res.status(500).json({ error: 'Failed to update settings' });
-                    } else {
-                        db.get('SELECT * FROM settings WHERE id = 1', (err, updatedRow) => {
-                            if (err) {
-                                res.status(500).json({ error: 'Failed to retrieve updated settings' });
-                            } else {
-                                res.json(updatedRow);
-                            }
-                        });
-                    }
-                }
-            );
-        } else {
-            db.run(
-                `INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0],
-                function (err) {
-                    if (err) {
-                        console.error('Error inserting settings:', err);
-                        res.status(500).json({ error: 'Failed to insert settings' });
-                    } else {
-                        db.get('SELECT * FROM settings WHERE id = 1', (err, insertedRow) => {
-                            if (err) {
-                                res.status(500).json({ error: 'Failed to retrieve inserted settings' });
-                            } else {
-                                res.json(insertedRow);
-                            }
-                        });
-                    }
-                }
-            );
-        }
-    });
+app.put('/api/settings', async (req, res) => {
+  const { site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode } = req.body;
+  try {
+    const result = await pool.query('SELECT * FROM settings WHERE id = 1');
+    if (result.rows.length > 0) {
+      const { rows } = await pool.query(
+        'UPDATE settings SET site_name = $1, phone = $2, contact_email = $3, facebook = $4, instagram = $5, adress = $6, gps = $7, maintenance_mode = $8 WHERE id = 1 RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0]
+      );
+      res.json(rows[0]);
+    } else {
+      const { rows } = await pool.query(
+        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0]
+      );
+      res.json(rows[0]);
+    }
+  } catch (err) {
+    console.error('Erreur lors de la mise à jour des paramètres :', err);
+    res.status(500).json({ error: 'Échec de la mise à jour des paramètres' });
+  }
 });
 
 // --- Testimonials Endpoints ---
-app.get('/api/testimonials', (req, res) => {
-    db.all('SELECT * FROM testimonials ORDER BY created_at DESC', [], (err, rows) => {
-        if (err) {
-            console.error('Error fetching testimonials:', err);
-            res.status(500).json({ error: 'Failed to fetch testimonials' });
-        } else {
-            res.json(rows);
-        }
-    });
+app.get('/api/testimonials', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM testimonials ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Erreur lors de la récupération des témoignages :', err);
+    res.status(500).json({ error: 'Échec de la récupération des témoignages' });
+  }
 });
 
-app.post('/api/testimonials', (req, res) => {
-    const { name, role, content, rating } = req.body;
-    if (!name || !role || !content || !rating) {
-        return res.status(400).json({ error: 'All fields are required' });
-    }
-    db.run(
-        'INSERT INTO testimonials (name, role, content, rating) VALUES (?, ?, ?, ?)',
-        [name, role, content, rating],
-        function (err) {
-            if (err) {
-                console.error('Error adding testimonial:', err);
-                res.status(500).json({ error: 'Failed to add testimonial' });
-            } else {
-                db.get('SELECT * FROM testimonials WHERE id = ?', [this.lastID], (err, row) => {
-                    if (err) {
-                        res.status(500).json({ error: 'Failed to retrieve inserted testimonial' });
-                    } else {
-                        res.status(201).json(row);
-                    }
-                });
-            }
-        }
+app.post('/api/testimonials', async (req, res) => {
+  const { name, role, content, rating } = req.body;
+  if (!name || !role || !content || !rating) {
+    return res.status(400).json({ error: 'Tous les champs sont requis' });
+  }
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO testimonials (name, role, content, rating) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, role, content, rating]
     );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('Erreur lors de l’ajout du témoignage :', err);
+    res.status(500).json({ error: 'Échec de l’ajout du témoignage' });
+  }
 });
 
-app.put('/api/testimonials/:id', (req, res) => {
-    const id = req.params.id;
-    const { name, role, content, rating } = req.body;
-    if (!name || !role || !content || !rating) {
-        return res.status(400).json({ error: 'All fields are required' });
-    }
-    db.run(
-        'UPDATE testimonials SET name = ?, role = ?, content = ?, rating = ? WHERE id = ?',
-        [name, role, content, rating, id],
-        function (err) {
-            if (err) {
-                console.error('Error updating testimonial:', err);
-                res.status(500).json({ error: 'Failed to update testimonial' });
-            } else if (this.changes === 0) {
-                res.status(404).json({ error: 'Testimonial not found' });
-            } else {
-                db.get('SELECT * FROM testimonials WHERE id = ?', [id], (err, row) => {
-                    if (err) {
-                        res.status(500).json({ error: 'Failed to retrieve updated testimonial' });
-                    } else {
-                        res.json(row);
-                    }
-                });
-            }
-        }
+app.put('/api/testimonials/:id', async (req, res) => {
+  const id = req.params.id;
+  const { name, role, content, rating } = req.body;
+  if (!name || !role || !content || !rating) {
+    return res.status(400).json({ error: 'Tous les champs sont requis' });
+  }
+  try {
+    const { rows } = await pool.query(
+      'UPDATE testimonials SET name = $1, role = $2, content = $3, rating = $4 WHERE id = $5 RETURNING *',
+      [name, role, content, rating, id]
     );
+    if (rows.length === 0) return res.status(404).json({ error: 'Témoignage non trouvé' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erreur lors de la mise à jour du témoignage :', err);
+    res.status(500).json({ error: 'Échec de la mise à jour du témoignage' });
+  }
 });
 
-app.delete('/api/testimonials/:id', (req, res) => {
-    const id = req.params.id;
-    db.run('DELETE FROM testimonials WHERE id = ?', [id], function (err) {
-        if (err) {
-            console.error('Error deleting testimonial:', err);
-            res.status(500).json({ error: 'Failed to delete testimonial' });
-        } else if (this.changes === 0) {
-            res.status(404).json({ error: 'Testimonial not found' });
-        } else {
-            res.json({ message: 'Testimonial deleted successfully', deletedId: id });
-        }
-    });
+app.delete('/api/testimonials/:id', async (req, res) => {
+  const id = req.params.id;
+  try {
+    const { rowCount } = await pool.query('DELETE FROM testimonials WHERE id = $1', [id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Témoignage non trouvé' });
+    res.json({ message: 'Témoignage supprimé avec succès', deletedId: id });
+  } catch (err) {
+    console.error('Erreur lors de la suppression du témoignage :', err);
+    res.status(500).json({ error: 'Échec de la suppression du témoignage' });
+  }
 });
 
-// Start the server
+// Démarrer le serveur
 const port = process.env.PORT || 5000;
 app.listen(port, () => {
-    console.log(`Server listening on port ${port} (SQLite)`);
+  console.log(`Serveur démarré sur le port ${port} (Neon PostgreSQL)`);
 });
 
-// Close database connection on process termination
-process.on('SIGINT', () => {
-    db.close((err) => {
-        if (err) {
-            console.error('Error closing database:', err);
-        }
-        console.log('Database connection closed.');
-        process.exit(0);
-    });
+// Fermeture propre
+process.on('SIGINT', async () => {
+  await pool.end();
+  console.log('Connexion à la base de données Neon fermée.');
+  process.exit(0);
 });
