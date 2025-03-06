@@ -1,4 +1,5 @@
 const express = require('express');
+const { Pool } = require('pg');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const multer = require('multer');
@@ -14,18 +15,9 @@ app.use(bodyParser.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Connexion à Neon (PostgreSQL)
-const { Pool } = require('pg');
-
-// Pool pour l’écriture (instance principale)
-const writePool = new Pool({
-  connectionString: process.env.DATABASE_URL_WRITE, // URL de l’instance principale
-  ssl: { rejectUnauthorized: false },
-});
-
-// Pool pour la lecture (réplique)
-const readPool = new Pool({
-  connectionString: process.env.DATABASE_URL_READ, // URL de la réplique Neon
-  ssl: { rejectUnauthorized: false },
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL, // L’URL sera définie dans Render
+  ssl: { rejectUnauthorized: false }, // Nécessaire pour Neon
 });
 
 // Configuration Cloudinary
@@ -38,7 +30,7 @@ cloudinary.config({
 // Création des tables dans Neon
 const createTables = async () => {
   try {
-    await writePool.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS cars (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
@@ -129,10 +121,9 @@ app.get('/', (req, res) => {
 });
 
 // --- Cars Endpoints ---
-// GET /api/cars
 app.get('/api/cars', async (req, res) => {
   try {
-    const result = await readPool.query('SELECT * FROM cars');
+    const result = await pool.query('SELECT * FROM cars');
     res.json(result.rows);
   } catch (err) {
     console.error('Erreur lors de la récupération des voitures :', err);
@@ -140,7 +131,6 @@ app.get('/api/cars', async (req, res) => {
   }
 });
 
-// POST /api/cars
 app.post('/api/cars', upload.single('image'), async (req, res) => {
   const { name, brand, price, available, description, consumption, acceleration, puissance } = req.body;
   if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance) {
@@ -149,19 +139,18 @@ app.post('/api/cars', upload.single('image'), async (req, res) => {
   try {
     const result = await cloudinary.uploader.upload(req.file.path, { folder: 'cars' });
     const imagePath = result.secure_url;
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
       [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance]
     );
     res.status(201).json(rows[0]);
-    fs.unlinkSync(req.file.path);
+    fs.unlinkSync(req.file.path); // Supprime le fichier temporaire
   } catch (err) {
     console.error('Erreur lors de l’ajout de la voiture :', err);
     res.status(500).json({ error: 'Échec de l’ajout de la voiture' });
   }
 });
 
-// PUT /api/cars/:id
 app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
   const id = req.params.id;
   const { name, brand, price, available, description, consumption, acceleration, vote, puissance } = req.body;
@@ -169,7 +158,7 @@ app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
     return res.status(400).json({ error: 'Nom, marque, prix et disponibilité sont requis' });
   }
   try {
-    const carResult = await readPool.query('SELECT image_url FROM cars WHERE id = $1', [id]); // Lecture pour vérifier l’image existante
+    const carResult = await pool.query('SELECT image_url FROM cars WHERE id = $1', [id]);
     if (carResult.rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
     const oldImageUrl = carResult.rows[0].image_url;
 
@@ -184,7 +173,7 @@ app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
       fs.unlinkSync(req.file.path);
     }
 
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'UPDATE cars SET name = $1, brand = $2, price = $3, available = $4, image_url = $5, description = $6, consumption = $7, acceleration = $8, vote = $9, puissance = $10 WHERE id = $11 RETURNING *',
       [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null, id]
     );
@@ -196,16 +185,15 @@ app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
   }
 });
 
-// DELETE /api/cars/:id
 app.delete('/api/cars/:id', async (req, res) => {
   const id = req.params.id;
   try {
-    const carResult = await readPool.query('SELECT image_url FROM cars WHERE id = $1', [id]); // Lecture pour récupérer l’image
+    const carResult = await pool.query('SELECT image_url FROM cars WHERE id = $1', [id]);
     if (carResult.rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
     const imageUrl = carResult.rows[0].image_url;
 
-    await writePool.query('DELETE FROM reservations WHERE car_id = $1', [id]);
-    await writePool.query('DELETE FROM cars WHERE id = $1', [id]);
+    await pool.query('DELETE FROM reservations WHERE car_id = $1', [id]);
+    await pool.query('DELETE FROM cars WHERE id = $1', [id]);
 
     if (imageUrl && imageUrl.startsWith('https://res.cloudinary.com')) {
       const publicId = imageUrl.split('/').slice(-1)[0].split('.')[0];
@@ -221,7 +209,7 @@ app.delete('/api/cars/:id', async (req, res) => {
 // --- Customers Endpoints ---
 app.get('/api/customers', async (req, res) => {
   try {
-    const result = await readPool.query('SELECT * FROM customers');
+    const result = await pool.query('SELECT * FROM customers');
     res.json(result.rows);
   } catch (err) {
     console.error('Erreur lors de la récupération des clients :', err);
@@ -233,7 +221,7 @@ app.post('/api/customers', async (req, res) => {
   const { name, phone, email } = req.body;
   if (!name || !phone) return res.status(400).json({ error: 'Nom et téléphone sont requis' });
   try {
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'INSERT INTO customers (name, phone, email) VALUES ($1, $2, $3) RETURNING *',
       [name, phone, email || null]
     );
@@ -249,7 +237,7 @@ app.put('/api/customers/:id', async (req, res) => {
   const { name, phone, email } = req.body;
   if (!name || !phone) return res.status(400).json({ error: 'Nom et téléphone sont requis' });
   try {
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'UPDATE customers SET name = $1, phone = $2, email = $3 WHERE id = $4 RETURNING *',
       [name, phone, email || null, id]
     );
@@ -264,8 +252,8 @@ app.put('/api/customers/:id', async (req, res) => {
 app.delete('/api/customers/:id', async (req, res) => {
   const id = req.params.id;
   try {
-    await writePool.query('DELETE FROM reservations WHERE customer_id = $1', [id]);
-    const { rowCount } = await writePool.query('DELETE FROM customers WHERE id = $1', [id]);
+    await pool.query('DELETE FROM reservations WHERE customer_id = $1', [id]);
+    const { rowCount } = await pool.query('DELETE FROM customers WHERE id = $1', [id]);
     if (rowCount === 0) return res.status(404).json({ error: 'Client non trouvé' });
     res.json({ message: 'Client supprimé avec succès', deletedCustomer: { id } });
   } catch (err) {
@@ -277,7 +265,7 @@ app.delete('/api/customers/:id', async (req, res) => {
 // --- Reservations Endpoints ---
 app.get('/api/reservations', async (req, res) => {
   try {
-    const result = await readPool.query(`
+    const result = await pool.query(`
       SELECT r.*, c.name AS customer_name, c.phone AS customer_phone, ca.name AS car_name, ca.price AS car_price
       FROM reservations r
       JOIN customers c ON r.customer_id = c.id
@@ -295,7 +283,7 @@ app.post('/api/reservations', async (req, res) => {
   if (!customer_id || !car_id || !start_date || !end_date) {
     return res.status(400).json({ error: 'ID client, ID voiture, date de début et date de fin sont requis' });
   }
-  const client = await writePool.connect(); // Transaction sur writePool
+  const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const carResult = await client.query('SELECT price, available FROM cars WHERE id = $1', [car_id]);
@@ -333,21 +321,21 @@ app.put('/api/reservations/:id', async (req, res) => {
     return res.status(400).json({ error: 'ID client, ID voiture, date de début et date de fin sont requis' });
   }
   try {
-    const carResult = await readPool.query('SELECT price FROM cars WHERE id = $1', [car_id]); // Lecture du prix
+    const carResult = await pool.query('SELECT price FROM cars WHERE id = $1', [car_id]);
     if (carResult.rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
     const days = Math.ceil((new Date(end_date) - new Date(start_date)) / (1000 * 60 * 60 * 24));
     const total = carResult.rows[0].price * days;
 
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'UPDATE reservations SET customer_id = $1, car_id = $2, start_date = $3, end_date = $4, total = $5, status = $6 WHERE id = $7 RETURNING *',
       [customer_id, car_id, start_date, end_date, total, status || 'pending', id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Réservation non trouvée' });
 
     if (status === 'completed' || status === 'canceled') {
-      await writePool.query('UPDATE cars SET available = 1 WHERE id = $1', [car_id]);
+      await pool.query('UPDATE cars SET available = 1 WHERE id = $1', [car_id]);
     } else if (status === 'active' || status === 'pending') {
-      await writePool.query('UPDATE cars SET available = 0 WHERE id = $1', [car_id]);
+      await pool.query('UPDATE cars SET available = 0 WHERE id = $1', [car_id]);
     }
     res.json(rows[0]);
   } catch (err) {
@@ -359,13 +347,13 @@ app.put('/api/reservations/:id', async (req, res) => {
 app.delete('/api/reservations/:id', async (req, res) => {
   const id = req.params.id;
   try {
-    const reservationResult = await readPool.query('SELECT car_id, total, customer_id FROM reservations WHERE id = $1', [id]); // Lecture des données
+    const reservationResult = await pool.query('SELECT car_id, total, customer_id FROM reservations WHERE id = $1', [id]);
     if (reservationResult.rows.length === 0) return res.status(404).json({ error: 'Réservation non trouvée' });
     const { car_id, total, customer_id } = reservationResult.rows[0];
 
-    await writePool.query('DELETE FROM reservations WHERE id = $1', [id]);
-    await writePool.query('UPDATE cars SET available = 1, reservations_count = reservations_count - 1 WHERE id = $1', [car_id]);
-    await writePool.query(
+    await pool.query('DELETE FROM reservations WHERE id = $1', [id]);
+    await pool.query('UPDATE cars SET available = 1, reservations_count = reservations_count - 1 WHERE id = $1', [car_id]);
+    await pool.query(
       'UPDATE customers SET reservations_count = reservations_count - 1, total_spent = total_spent - $1 WHERE id = $2',
       [total, customer_id]
     );
@@ -489,8 +477,7 @@ app.listen(port, () => {
 
 // Fermeture propre
 process.on('SIGINT', async () => {
-  await writePool.end();
-  await readPool.end();
-  console.log('Connexions aux bases de données Neon fermées.');
+  await pool.end();
+  console.log('Connexion à la base de données Neon fermée.');
   process.exit(0);
 });
