@@ -79,6 +79,7 @@ const createTables = async () => {
         instagram TEXT,
         adress TEXT,
         gps TEXT,
+        password TEXT,
         maintenance_mode INTEGER
       );
       CREATE TABLE IF NOT EXISTS testimonials (
@@ -88,11 +89,6 @@ const createTables = async () => {
         content TEXT NOT NULL,
         rating INTEGER NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-      CREATE TABLE IF NOT EXISTS admins (
-        id SERIAL PRIMARY KEY,
-        username TEXT NOT NULL UNIQUE,
-        password TEXT NOT NULL
       );
     `);
     console.log('Tables créées avec succès dans Neon.');
@@ -126,74 +122,11 @@ const upload = multer({
   },
 });
 
-const bcrypt = require('bcrypt');
-
 // Root endpoint
 app.get('/', (req, res) => {
   res.send('Luxury Drive API (Neon PostgreSQL) is running!');
 });
 
-//signup
-app.post('/api/signup', async (req, res) => {
-  const { username, password } = req.body;
-  
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis' });
-  }
-  
-  try {
-    // Hacher le mot de passe
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-    
-    const { rows } = await writePool.query(
-      'INSERT INTO admins (username, password) VALUES ($1, $2) RETURNING id, username',
-      [username, hashedPassword]
-    );
-    
-    res.status(201).json({ admin: { id: rows[0].id, username: rows[0].username } });
-  } catch (err) {
-    console.error('Erreur d\'inscription:', err);
-    res.status(500).json({ error: 'Erreur lors de l\'inscription' });
-  }
-});
-
-// Login avec vérification du mot de passe haché
-app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body;
-  
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis' });
-  }
-  
-  try {
-    const { rows } = await readPool.query(
-      'SELECT id, username, password FROM admins WHERE username = $1',
-      [username]
-    );
-    
-    if (rows.length === 0) {
-      return res.status(401).json({ error: 'Identifiants invalides' });
-    }
-    
-    // Vérifier le mot de passe avec bcrypt
-    const passwordMatch = await bcrypt.compare(password, rows[0].password);
-    if (!passwordMatch) {
-      return res.status(401).json({ error: 'Identifiants invalides' });
-    }
-    
-    // Renvoyer les informations de l'admin sans le mot de passe
-    const admin = {
-      id: rows[0].id,
-      username: rows[0].username
-    };
-    
-    res.json({ admin });
-  } catch (err) {
-    console.error('Erreur de connexion:', err);
-    res.status(500).json({ error: 'Erreur lors de la connexion' });
-  }
-});
 // --- Cars Endpoints ---
 app.get('/api/cars', async (req, res) => {
   try {
@@ -451,6 +384,7 @@ app.get('/api/settings', async (req, res) => {
         instagram: 'instagram.com',
         adress: 'adress',
         gps: 'gps',
+        password: 'admin123',
         maintenance_mode: 0,
       });
     }
@@ -462,19 +396,19 @@ app.get('/api/settings', async (req, res) => {
 });
 
 app.put('/api/settings', async (req, res) => {
-  const { site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode } = req.body;
+  const { site_name, phone, contact_email, facebook, instagram, adress, gps,password, maintenance_mode } = req.body;
   try {
     const result = await readPool.query('SELECT * FROM settings WHERE id = 1');
     if (result.rows.length > 0) {
       const { rows } = await writePool.query(
-        'UPDATE settings SET site_name = $1, phone = $2, contact_email = $3, facebook = $4, instagram = $5, adress = $6, gps = $7, maintenance_mode = $8 WHERE id = 1 RETURNING *',
-        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0]
+        'UPDATE settings SET site_name = $1, phone = $2, contact_email = $3, facebook = $4, instagram = $5, adress = $6, gps = $7, maintenance_mode = $8,password = $9 WHERE id = 1 RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps,password, maintenance_mode ? 1 : 0]
       );
       res.json(rows[0]);
     } else {
       const { rows } = await writePool.query(
-        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
-        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0]
+        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps,password, maintenance_mode) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps,password, maintenance_mode ? 1 : 0]
       );
       res.json(rows[0]);
     }
