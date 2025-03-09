@@ -126,6 +126,8 @@ const upload = multer({
   },
 });
 
+const bcrypt = require('bcrypt');
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.send('Luxury Drive API (Neon PostgreSQL) is running!');
@@ -134,40 +136,64 @@ app.get('/', (req, res) => {
 //signup
 app.post('/api/signup', async (req, res) => {
   const { username, password } = req.body;
+  
   if (!username || !password) {
-    return res.status(400).json({ error: 'Nom d’utilisateur et mot de passe requis' });
+    return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis' });
   }
+  
   try {
-    const { rows } = await pool.query(
+    // Hacher le mot de passe
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    
+    const { rows } = await writePool.query(
       'INSERT INTO admins (username, password) VALUES ($1, $2) RETURNING id, username',
-      [username, password]
+      [username, hashedPassword]
     );
-    res.status(201).json(rows[0]);
+    
+    res.status(201).json({ admin: { id: rows[0].id, username: rows[0].username } });
   } catch (err) {
-    res.status(500).json({ error: 'Erreur lors de l’inscription' });
+    console.error('Erreur d\'inscription:', err);
+    res.status(500).json({ error: 'Erreur lors de l\'inscription' });
   }
 });
 
-//Login
+// Login avec vérification du mot de passe haché
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
+  
   if (!username || !password) {
-    return res.status(400).json({ error: 'Nom d’utilisateur et mot de passe requis' });
+    return res.status(400).json({ error: 'Nom d\'utilisateur et mot de passe requis' });
   }
+  
   try {
-    const { rows } = await pool.query(
-      'SELECT * FROM admins WHERE username = $1',
+    const { rows } = await readPool.query(
+      'SELECT id, username, password FROM admins WHERE username = $1',
       [username]
     );
-    if (rows.length === 0 || rows[0].password !== password) {
+    
+    if (rows.length === 0) {
       return res.status(401).json({ error: 'Identifiants invalides' });
     }
-    res.json({ message: 'Connexion réussie' });
+    
+    // Vérifier le mot de passe avec bcrypt
+    const passwordMatch = await bcrypt.compare(password, rows[0].password);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: 'Identifiants invalides' });
+    }
+    
+    // Renvoyer les informations de l'admin sans le mot de passe
+    const admin = {
+      id: rows[0].id,
+      username: rows[0].username
+    };
+    
+    res.json({ admin });
   } catch (err) {
+    console.error('Erreur de connexion:', err);
     res.status(500).json({ error: 'Erreur lors de la connexion' });
   }
 });
-
 // --- Cars Endpoints ---
 app.get('/api/cars', async (req, res) => {
   try {
