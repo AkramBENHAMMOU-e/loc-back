@@ -47,6 +47,7 @@ const createTables = async () => {
         acceleration TEXT,
         consumption TEXT,
         puissance TEXT,
+        transmission TEXT,
         reservations_count INTEGER DEFAULT 0,
         vote INTEGER DEFAULT 0
       );
@@ -88,6 +89,11 @@ const createTables = async () => {
         rating INTEGER NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS admins (
+        id SERIAL PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL
+      );
     `);
     console.log('Tables créées avec succès dans Neon.');
   } catch (err) {
@@ -125,6 +131,43 @@ app.get('/', (req, res) => {
   res.send('Luxury Drive API (Neon PostgreSQL) is running!');
 });
 
+//signup
+app.post('/api/signup', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Nom d’utilisateur et mot de passe requis' });
+  }
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO admins (username, password) VALUES ($1, $2) RETURNING id, username',
+      [username, password]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur lors de l’inscription' });
+  }
+});
+
+//Login
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Nom d’utilisateur et mot de passe requis' });
+  }
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM admins WHERE username = $1',
+      [username]
+    );
+    if (rows.length === 0 || rows[0].password !== password) {
+      return res.status(401).json({ error: 'Identifiants invalides' });
+    }
+    res.json({ message: 'Connexion réussie' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur lors de la connexion' });
+  }
+});
+
 // --- Cars Endpoints ---
 app.get('/api/cars', async (req, res) => {
   try {
@@ -137,19 +180,19 @@ app.get('/api/cars', async (req, res) => {
 });
 
 app.post('/api/cars', upload.single('image'), async (req, res) => {
-  const { name, brand, price, available, description, consumption, acceleration, puissance } = req.body;
-  if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance) {
+  const { name, brand, price, available, description, consumption, acceleration, puissance, transmission } = req.body;
+  if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance || !transmission) {
     return res.status(400).json({ error: 'Tous les champs sont requis, y compris une image' });
   }
   try {
     const result = await cloudinary.uploader.upload(req.file.path, { folder: 'cars' });
     const imagePath = result.secure_url;
     const { rows } = await writePool.query(
-      'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
-      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance]
+      'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance, transmission) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
+      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance, transmission]
     );
-    res.status(201).json(rows[0]);
     fs.unlinkSync(req.file.path); // Supprime le fichier temporaire
+    res.status(201).json(rows[0]);
   } catch (err) {
     console.error('Erreur lors de l’ajout de la voiture :', err);
     res.status(500).json({ error: 'Échec de l’ajout de la voiture' });
@@ -158,7 +201,7 @@ app.post('/api/cars', upload.single('image'), async (req, res) => {
 
 app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
   const id = req.params.id;
-  const { name, brand, price, available, description, consumption, acceleration, vote, puissance } = req.body;
+  const { name, brand, price, available, description, consumption, acceleration, vote, puissance, transmission } = req.body;
   if (!name || !brand || !price || available === undefined) {
     return res.status(400).json({ error: 'Nom, marque, prix et disponibilité sont requis' });
   }
@@ -179,8 +222,8 @@ app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
     }
 
     const { rows } = await writePool.query(
-      'UPDATE cars SET name = $1, brand = $2, price = $3, available = $4, image_url = $5, description = $6, consumption = $7, acceleration = $8, vote = $9, puissance = $10 WHERE id = $11 RETURNING *',
-      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null, id]
+      'UPDATE cars SET name = $1, brand = $2, price = $3, available = $4, image_url = $5, description = $6, consumption = $7, acceleration = $8, vote = $9, puissance = $10, transmission = $11 WHERE id = $12 RETURNING *',
+      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null,transmission || null, id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
     res.json(rows[0]);
@@ -474,15 +517,5 @@ app.delete('/api/testimonials/:id', async (req, res) => {
   }
 });
 
-// Démarrer le serveur
-const port = process.env.PORT || 5000;
-app.listen(port, () => {
-  console.log(`Serveur démarré sur le port ${port} (Neon PostgreSQL)`);
-});
-
-// Fermeture propre des deux pools
-process.on('SIGINT', async () => {
-  await Promise.all([writePool.end(), readPool.end()]);
-  console.log('Connexions à la base de données Neon fermées.');
-  process.exit(0);
-});
+// Export pour Vercel (pas de app.listen dans un environnement serverless)
+module.exports = app;
