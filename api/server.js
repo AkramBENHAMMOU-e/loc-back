@@ -356,20 +356,27 @@ app.delete('/api/reservations/:id', async (req, res) => {
   try {
     const reservationResult = await readPool.query('SELECT car_id, total, customer_id FROM reservations WHERE id = $1', [id]);
     if (reservationResult.rows.length === 0) return res.status(404).json({ error: 'Réservation non trouvée' });
+
     const { car_id, total, customer_id } = reservationResult.rows[0];
 
     await writePool.query('DELETE FROM reservations WHERE id = $1', [id]);
-    await writePool.query('UPDATE cars SET available = 1, reservations_count = reservations_count - 1 WHERE id = $1', [car_id]);
+
+    // Remettre la voiture en disponible
+    await writePool.query('UPDATE cars SET available = 1 WHERE id = $1', [car_id]);
+
+    // Mettre à jour le client
     await writePool.query(
       'UPDATE customers SET reservations_count = reservations_count - 1, total_spent = total_spent - $1 WHERE id = $2',
       [total, customer_id]
     );
+
     res.json({ message: 'Réservation supprimée avec succès', deletedReservation: { id } });
   } catch (err) {
     console.error('Erreur lors de la suppression de la réservation :', err);
     res.status(500).json({ error: 'Échec de la suppression de la réservation' });
   }
 });
+
 
 // --- Settings Endpoints ---
 app.get('/api/settings', async (req, res) => {
