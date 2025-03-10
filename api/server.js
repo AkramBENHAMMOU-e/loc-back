@@ -6,22 +6,28 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cloudinary = require('cloudinary').v2;
+const bcrypt = require('bcrypt'); // Added for password hashing
 
 const app = express();
 
 // Middleware
-app.use(cors());
+const corsOptions = {
+    origin: 'http://localhost:3000', // Autoriser uniquement cette origine en développement
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type'],
+};
+app.use(cors(corsOptions));
 app.use(bodyParser.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Connexion à Neon (PostgreSQL) - Deux pools
 const writePool = new Pool({
-  connectionString: process.env.DATABASE_URL_WRITE || process.env.DATABASE_URL, // URL pour écriture
+  connectionString: "postgresql://neondb_owner:npg_cuRmE4B0TJGP@ep-polished-dew-a8xrb7u0-pooler.eastus2.azure.neon.tech/neondb?sslmode=require",
   ssl: { rejectUnauthorized: false },
 });
 
 const readPool = new Pool({
-  connectionString: process.env.DATABASE_URL_READ || process.env.DATABASE_URL, // URL pour lecture
+  connectionString: "postgresql://neondb_owner:npg_cuRmE4B0TJGP@ep-little-water-a8i3hzze-pooler.eastus2.azure.neon.tech/neondb?sslmode=require",
   ssl: { rejectUnauthorized: false },
 });
 
@@ -32,7 +38,7 @@ cloudinary.config({
   api_secret: 'obQzDBDjB8qswwwSKJtYbL7f-S4',
 });
 
-// Création des tables dans Neon (utilise writePool car c'est une écriture)
+// Création des tables dans Neon
 const createTables = async () => {
   try {
     await writePool.query(`
@@ -47,6 +53,7 @@ const createTables = async () => {
         acceleration TEXT,
         consumption TEXT,
         puissance TEXT,
+        transmission TEXT,
         reservations_count INTEGER DEFAULT 0,
         vote INTEGER DEFAULT 0
       );
@@ -78,7 +85,8 @@ const createTables = async () => {
         instagram TEXT,
         adress TEXT,
         gps TEXT,
-        maintenance_mode INTEGER
+        maintenance_mode INTEGER,
+        password TEXT -- Fixed comma issue
       );
       CREATE TABLE IF NOT EXISTS testimonials (
         id SERIAL PRIMARY KEY,
@@ -89,6 +97,18 @@ const createTables = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // Insert default settings if not exists
+    const settingsCheck = await readPool.query('SELECT * FROM settings WHERE id = 1');
+    if (settingsCheck.rows.length === 0) {
+      const hashedPassword = await bcrypt.hash('admin123', 10); // Hash default password
+      await writePool.query(
+        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)',
+        [1, 'Luxury Drive', '212000000', 'admin@luxurydrive.com', 'facebook.com', 'instagram.com', 'adress', 'gps', 0, hashedPassword]
+      );
+      console.log('Default settings inserted with hashed password.');
+    }
+
     console.log('Tables créées avec succès dans Neon.');
   } catch (err) {
     console.error('Erreur lors de la création des tables :', err);
@@ -137,19 +157,19 @@ app.get('/api/cars', async (req, res) => {
 });
 
 app.post('/api/cars', upload.single('image'), async (req, res) => {
-  const { name, brand, price, available, description, consumption, acceleration, puissance } = req.body;
-  if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance) {
+  const { name, brand, price, available, description, consumption, acceleration, puissance, transmission } = req.body;
+  if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance || !transmission) {
     return res.status(400).json({ error: 'Tous les champs sont requis, y compris une image' });
   }
   try {
     const result = await cloudinary.uploader.upload(req.file.path, { folder: 'cars' });
     const imagePath = result.secure_url;
     const { rows } = await writePool.query(
-      'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
-      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance]
+      'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance, transmission) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
+      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance, transmission]
     );
-    res.status(201).json(rows[0]);
     fs.unlinkSync(req.file.path); // Supprime le fichier temporaire
+    res.status(201).json(rows[0]);
   } catch (err) {
     console.error('Erreur lors de l’ajout de la voiture :', err);
     res.status(500).json({ error: 'Échec de l’ajout de la voiture' });
@@ -158,7 +178,7 @@ app.post('/api/cars', upload.single('image'), async (req, res) => {
 
 app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
   const id = req.params.id;
-  const { name, brand, price, available, description, consumption, acceleration, vote, puissance } = req.body;
+  const { name, brand, price, available, description, consumption, acceleration, vote, puissance, transmission } = req.body;
   if (!name || !brand || !price || available === undefined) {
     return res.status(400).json({ error: 'Nom, marque, prix et disponibilité sont requis' });
   }
@@ -179,8 +199,8 @@ app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
     }
 
     const { rows } = await writePool.query(
-      'UPDATE cars SET name = $1, brand = $2, price = $3, available = $4, image_url = $5, description = $6, consumption = $7, acceleration = $8, vote = $9, puissance = $10 WHERE id = $11 RETURNING *',
-      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null, id]
+      'UPDATE cars SET name = $1, brand = $2, price = $3, available = $4, image_url = $5, description = $6, consumption = $7, acceleration = $8, vote = $9, puissance = $10, transmission = $11 WHERE id = $12 RETURNING *',
+      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null,transmission || null, id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
     res.json(rows[0]);
@@ -354,14 +374,20 @@ app.delete('/api/reservations/:id', async (req, res) => {
   try {
     const reservationResult = await readPool.query('SELECT car_id, total, customer_id FROM reservations WHERE id = $1', [id]);
     if (reservationResult.rows.length === 0) return res.status(404).json({ error: 'Réservation non trouvée' });
+
     const { car_id, total, customer_id } = reservationResult.rows[0];
 
     await writePool.query('DELETE FROM reservations WHERE id = $1', [id]);
-    await writePool.query('UPDATE cars SET available = 1, reservations_count = reservations_count - 1 WHERE id = $1', [car_id]);
+
+    // Remettre la voiture en disponible
+    await writePool.query('UPDATE cars SET available = 1 WHERE id = $1', [car_id]);
+
+    // Mettre à jour le client
     await writePool.query(
       'UPDATE customers SET reservations_count = reservations_count - 1, total_spent = total_spent - $1 WHERE id = $2',
       [total, customer_id]
     );
+
     res.json({ message: 'Réservation supprimée avec succès', deletedReservation: { id } });
   } catch (err) {
     console.error('Erreur lors de la suppression de la réservation :', err);
@@ -369,12 +395,13 @@ app.delete('/api/reservations/:id', async (req, res) => {
   }
 });
 
+
 // --- Settings Endpoints ---
 app.get('/api/settings', async (req, res) => {
   try {
     const result = await readPool.query('SELECT * FROM settings WHERE id = 1');
     if (result.rows.length === 0) {
-      return res.json({
+      const defaultSettings = {
         site_name: 'Luxury Drive',
         phone: '212000000',
         contact_email: 'admin@luxurydrive.com',
@@ -383,9 +410,16 @@ app.get('/api/settings', async (req, res) => {
         adress: 'adress',
         gps: 'gps',
         maintenance_mode: 0,
-      });
+        password: await bcrypt.hash('admin123', 10) // Hash default password
+      };
+      await writePool.query(
+        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
+        [defaultSettings.site_name, defaultSettings.phone, defaultSettings.contact_email, defaultSettings.facebook, defaultSettings.instagram, defaultSettings.adress, defaultSettings.gps, defaultSettings.maintenance_mode, defaultSettings.password]
+      );
+      res.json(defaultSettings);
+    } else {
+      res.json(result.rows[0]);
     }
-    res.json(result.rows[0]);
   } catch (err) {
     console.error('Erreur lors de la récupération des paramètres :', err);
     res.status(500).json({ error: 'Échec de la récupération des paramètres' });
@@ -393,25 +427,54 @@ app.get('/api/settings', async (req, res) => {
 });
 
 app.put('/api/settings', async (req, res) => {
-  const { site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode } = req.body;
+  const { site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password } = req.body;
   try {
+    let hashedPassword = password;
+    if (password) {
+      hashedPassword = await bcrypt.hash(password, 10); // Hash the new password
+    } else {
+      const existingSettings = await readPool.query('SELECT password FROM settings WHERE id = 1');
+      hashedPassword = existingSettings.rows[0]?.password; // Keep existing password if not provided
+    }
+
     const result = await readPool.query('SELECT * FROM settings WHERE id = 1');
     if (result.rows.length > 0) {
       const { rows } = await writePool.query(
-        'UPDATE settings SET site_name = $1, phone = $2, contact_email = $3, facebook = $4, instagram = $5, adress = $6, gps = $7, maintenance_mode = $8 WHERE id = 1 RETURNING *',
-        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0]
+        'UPDATE settings SET site_name = $1, phone = $2, contact_email = $3, facebook = $4, instagram = $5, adress = $6, gps = $7, maintenance_mode = $8, password = $9 WHERE id = 1 RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0, hashedPassword]
       );
       res.json(rows[0]);
     } else {
       const { rows } = await writePool.query(
-        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
-        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0]
+        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0, hashedPassword]
       );
       res.json(rows[0]);
     }
   } catch (err) {
     console.error('Erreur lors de la mise à jour des paramètres :', err);
     res.status(500).json({ error: 'Échec de la mise à jour des paramètres' });
+  }
+});
+
+app.post('/api/verify-password', async (req, res) => {
+  const { password } = req.body;
+  if (!password) {
+    return res.status(400).json({ error: 'Mot de passe requis' });
+  }
+  try {
+    const result = await readPool.query('SELECT password FROM settings WHERE id = 1');
+    if (result.rows.length === 0) {
+      const defaultHashedPassword = await bcrypt.hash('admin123', 10);
+      const isMatch = await bcrypt.compare(password, defaultHashedPassword);
+      return res.json({ isValid: isMatch });
+    }
+    const storedPassword = result.rows[0].password;
+    const isMatch = await bcrypt.compare(password, storedPassword);
+    res.json({ isValid: isMatch });
+  } catch (err) {
+    console.error('Erreur lors de la vérification du mot de passe :', err);
+    res.status(500).json({ error: 'Échec de la vérification du mot de passe' });
   }
 });
 
@@ -474,15 +537,5 @@ app.delete('/api/testimonials/:id', async (req, res) => {
   }
 });
 
-// Démarrer le serveur
-const port = process.env.PORT || 5000;
-app.listen(port, () => {
-  console.log(`Serveur démarré sur le port ${port} (Neon PostgreSQL)`);
-});
-
-// Fermeture propre des deux pools
-process.on('SIGINT', async () => {
-  await Promise.all([writePool.end(), readPool.end()]);
-  console.log('Connexions à la base de données Neon fermées.');
-  process.exit(0);
-});
+// Export pour Vercel (pas de app.listen dans un environnement serverless)
+module.exports = app;
