@@ -1,33 +1,26 @@
 const express = require('express');
-const { Pool } = require('pg');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cloudinary = require('cloudinary').v2;
-const bcrypt = require('bcrypt'); // Added for password hashing
 
 const app = express();
 
 // Middleware
-const corsOptions = {
-    origin: 'http://localhost:3000', // Autoriser uniquement cette origine en développement
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    allowedHeaders: ['Content-Type'],
-};
-app.use(cors(corsOptions));
+app.use(cors());
 app.use(bodyParser.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Connexion à Neon (PostgreSQL) - Deux pools
-const writePool = new Pool({
-  connectionString: "postgresql://neondb_owner:npg_cuRmE4B0TJGP@ep-polished-dew-a8xrb7u0-pooler.eastus2.azure.neon.tech/neondb?sslmode=require",
-  ssl: { rejectUnauthorized: false },
-});
+// Connexion à Neon (PostgreSQL)
+const { Pool } = require('pg');
 
-const readPool = new Pool({
-  connectionString: "postgresql://neondb_owner:npg_cuRmE4B0TJGP@ep-little-water-a8i3hzze-pooler.eastus2.azure.neon.tech/neondb?sslmode=require",
+
+
+// Pool pour la lecture (réplique)
+const pool = new Pool({
+  connectionString: "postgresql://neondb_owner:npg_cuRmE4B0TJGP@ep-polished-dew-a8xrb7u0-pooler.eastus2.azure.neon.tech/neondb?sslmode=require", // URL de la réplique Neon
   ssl: { rejectUnauthorized: false },
 });
 
@@ -41,7 +34,7 @@ cloudinary.config({
 // Création des tables dans Neon
 const createTables = async () => {
   try {
-    await writePool.query(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS cars (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
@@ -53,7 +46,6 @@ const createTables = async () => {
         acceleration TEXT,
         consumption TEXT,
         puissance TEXT,
-        transmission TEXT,
         reservations_count INTEGER DEFAULT 0,
         vote INTEGER DEFAULT 0
       );
@@ -85,8 +77,7 @@ const createTables = async () => {
         instagram TEXT,
         adress TEXT,
         gps TEXT,
-        maintenance_mode INTEGER,
-        password TEXT -- Fixed comma issue
+        maintenance_mode INTEGER
       );
       CREATE TABLE IF NOT EXISTS testimonials (
         id SERIAL PRIMARY KEY,
@@ -97,18 +88,6 @@ const createTables = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-
-    // Insert default settings if not exists
-    const settingsCheck = await readPool.query('SELECT * FROM settings WHERE id = 1');
-    if (settingsCheck.rows.length === 0) {
-      const hashedPassword = await bcrypt.hash('admin123', 10); // Hash default password
-      await writePool.query(
-        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)',
-        [1, 'Luxury Drive', '212000000', 'admin@luxurydrive.com', 'facebook.com', 'instagram.com', 'adress', 'gps', 0, hashedPassword]
-      );
-      console.log('Default settings inserted with hashed password.');
-    }
-
     console.log('Tables créées avec succès dans Neon.');
   } catch (err) {
     console.error('Erreur lors de la création des tables :', err);
@@ -146,9 +125,10 @@ app.get('/', (req, res) => {
 });
 
 // --- Cars Endpoints ---
+// GET /api/cars
 app.get('/api/cars', async (req, res) => {
   try {
-    const result = await readPool.query('SELECT * FROM cars');
+    const result = await pool.query('SELECT * FROM cars');
     res.json(result.rows);
   } catch (err) {
     console.error('Erreur lors de la récupération des voitures :', err);
@@ -156,34 +136,36 @@ app.get('/api/cars', async (req, res) => {
   }
 });
 
+// POST /api/cars
 app.post('/api/cars', upload.single('image'), async (req, res) => {
-  const { name, brand, price, available, description, consumption, acceleration, puissance, transmission } = req.body;
-  if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance || !transmission) {
+  const { name, brand, price, available, description, consumption, acceleration, puissance } = req.body;
+  if (!name || !brand || !price || available === undefined || !req.file || !description || !consumption || !acceleration || !puissance) {
     return res.status(400).json({ error: 'Tous les champs sont requis, y compris une image' });
   }
   try {
     const result = await cloudinary.uploader.upload(req.file.path, { folder: 'cars' });
     const imagePath = result.secure_url;
-    const { rows } = await writePool.query(
-      'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance, transmission) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
-      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance, transmission]
+    const { rows } = await pool.query(
+      'INSERT INTO cars (name, brand, price, available, image_url, description, acceleration, consumption, puissance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
+      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description, acceleration, consumption, puissance]
     );
-    fs.unlinkSync(req.file.path); // Supprime le fichier temporaire
     res.status(201).json(rows[0]);
+    fs.unlinkSync(req.file.path);
   } catch (err) {
     console.error('Erreur lors de l’ajout de la voiture :', err);
     res.status(500).json({ error: 'Échec de l’ajout de la voiture' });
   }
 });
 
+// PUT /api/cars/:id
 app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
   const id = req.params.id;
-  const { name, brand, price, available, description, consumption, acceleration, vote, puissance, transmission } = req.body;
+  const { name, brand, price, available, description, consumption, acceleration, vote, puissance } = req.body;
   if (!name || !brand || !price || available === undefined) {
     return res.status(400).json({ error: 'Nom, marque, prix et disponibilité sont requis' });
   }
   try {
-    const carResult = await readPool.query('SELECT image_url FROM cars WHERE id = $1', [id]);
+    const carResult = await pool.query('SELECT image_url FROM cars WHERE id = $1', [id]); // Lecture pour vérifier l’image existante
     if (carResult.rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
     const oldImageUrl = carResult.rows[0].image_url;
 
@@ -198,9 +180,9 @@ app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
       fs.unlinkSync(req.file.path);
     }
 
-    const { rows } = await writePool.query(
-      'UPDATE cars SET name = $1, brand = $2, price = $3, available = $4, image_url = $5, description = $6, consumption = $7, acceleration = $8, vote = $9, puissance = $10, transmission = $11 WHERE id = $12 RETURNING *',
-      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null,transmission || null, id]
+    const { rows } = await pool.query(
+      'UPDATE cars SET name = $1, brand = $2, price = $3, available = $4, image_url = $5, description = $6, consumption = $7, acceleration = $8, vote = $9, puissance = $10 WHERE id = $11 RETURNING *',
+      [name, brand, price, available === 'true' ? 1 : 0, imagePath, description || null, consumption || null, acceleration || null, vote || null, puissance || null, id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
     res.json(rows[0]);
@@ -210,15 +192,16 @@ app.put('/api/cars/:id', upload.single('image'), async (req, res) => {
   }
 });
 
+// DELETE /api/cars/:id
 app.delete('/api/cars/:id', async (req, res) => {
   const id = req.params.id;
   try {
-    const carResult = await readPool.query('SELECT image_url FROM cars WHERE id = $1', [id]);
+    const carResult = await pool.query('SELECT image_url FROM cars WHERE id = $1', [id]); // Lecture pour récupérer l’image
     if (carResult.rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
     const imageUrl = carResult.rows[0].image_url;
 
-    await writePool.query('DELETE FROM reservations WHERE car_id = $1', [id]);
-    await writePool.query('DELETE FROM cars WHERE id = $1', [id]);
+    await pool.query('DELETE FROM reservations WHERE car_id = $1', [id]);
+    await pool.query('DELETE FROM cars WHERE id = $1', [id]);
 
     if (imageUrl && imageUrl.startsWith('https://res.cloudinary.com')) {
       const publicId = imageUrl.split('/').slice(-1)[0].split('.')[0];
@@ -234,7 +217,7 @@ app.delete('/api/cars/:id', async (req, res) => {
 // --- Customers Endpoints ---
 app.get('/api/customers', async (req, res) => {
   try {
-    const result = await readPool.query('SELECT * FROM customers');
+    const result = await pool.query('SELECT * FROM customers');
     res.json(result.rows);
   } catch (err) {
     console.error('Erreur lors de la récupération des clients :', err);
@@ -246,7 +229,7 @@ app.post('/api/customers', async (req, res) => {
   const { name, phone, email } = req.body;
   if (!name || !phone) return res.status(400).json({ error: 'Nom et téléphone sont requis' });
   try {
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'INSERT INTO customers (name, phone, email) VALUES ($1, $2, $3) RETURNING *',
       [name, phone, email || null]
     );
@@ -262,7 +245,7 @@ app.put('/api/customers/:id', async (req, res) => {
   const { name, phone, email } = req.body;
   if (!name || !phone) return res.status(400).json({ error: 'Nom et téléphone sont requis' });
   try {
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'UPDATE customers SET name = $1, phone = $2, email = $3 WHERE id = $4 RETURNING *',
       [name, phone, email || null, id]
     );
@@ -277,8 +260,8 @@ app.put('/api/customers/:id', async (req, res) => {
 app.delete('/api/customers/:id', async (req, res) => {
   const id = req.params.id;
   try {
-    await writePool.query('DELETE FROM reservations WHERE customer_id = $1', [id]);
-    const { rowCount } = await writePool.query('DELETE FROM customers WHERE id = $1', [id]);
+    await pool.query('DELETE FROM reservations WHERE customer_id = $1', [id]);
+    const { rowCount } = await pool.query('DELETE FROM customers WHERE id = $1', [id]);
     if (rowCount === 0) return res.status(404).json({ error: 'Client non trouvé' });
     res.json({ message: 'Client supprimé avec succès', deletedCustomer: { id } });
   } catch (err) {
@@ -290,7 +273,7 @@ app.delete('/api/customers/:id', async (req, res) => {
 // --- Reservations Endpoints ---
 app.get('/api/reservations', async (req, res) => {
   try {
-    const result = await readPool.query(`
+    const result = await pool.query(`
       SELECT r.*, c.name AS customer_name, c.phone AS customer_phone, ca.name AS car_name, ca.price AS car_price
       FROM reservations r
       JOIN customers c ON r.customer_id = c.id
@@ -308,7 +291,7 @@ app.post('/api/reservations', async (req, res) => {
   if (!customer_id || !car_id || !start_date || !end_date) {
     return res.status(400).json({ error: 'ID client, ID voiture, date de début et date de fin sont requis' });
   }
-  const client = await writePool.connect();
+  const client = await pool.connect(); // Transaction sur pool
   try {
     await client.query('BEGIN');
     const carResult = await client.query('SELECT price, available FROM cars WHERE id = $1', [car_id]);
@@ -346,21 +329,21 @@ app.put('/api/reservations/:id', async (req, res) => {
     return res.status(400).json({ error: 'ID client, ID voiture, date de début et date de fin sont requis' });
   }
   try {
-    const carResult = await readPool.query('SELECT price FROM cars WHERE id = $1', [car_id]);
+    const carResult = await pool.query('SELECT price FROM cars WHERE id = $1', [car_id]); // Lecture du prix
     if (carResult.rows.length === 0) return res.status(404).json({ error: 'Voiture non trouvée' });
     const days = Math.ceil((new Date(end_date) - new Date(start_date)) / (1000 * 60 * 60 * 24));
     const total = carResult.rows[0].price * days;
 
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'UPDATE reservations SET customer_id = $1, car_id = $2, start_date = $3, end_date = $4, total = $5, status = $6 WHERE id = $7 RETURNING *',
       [customer_id, car_id, start_date, end_date, total, status || 'pending', id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Réservation non trouvée' });
 
     if (status === 'completed' || status === 'canceled') {
-      await writePool.query('UPDATE cars SET available = 1 WHERE id = $1', [car_id]);
+      await pool.query('UPDATE cars SET available = 1 WHERE id = $1', [car_id]);
     } else if (status === 'active' || status === 'pending') {
-      await writePool.query('UPDATE cars SET available = 0 WHERE id = $1', [car_id]);
+      await pool.query('UPDATE cars SET available = 0 WHERE id = $1', [car_id]);
     }
     res.json(rows[0]);
   } catch (err) {
@@ -372,22 +355,16 @@ app.put('/api/reservations/:id', async (req, res) => {
 app.delete('/api/reservations/:id', async (req, res) => {
   const id = req.params.id;
   try {
-    const reservationResult = await readPool.query('SELECT car_id, total, customer_id FROM reservations WHERE id = $1', [id]);
+    const reservationResult = await pool.query('SELECT car_id, total, customer_id FROM reservations WHERE id = $1', [id]); // Lecture des données
     if (reservationResult.rows.length === 0) return res.status(404).json({ error: 'Réservation non trouvée' });
-
     const { car_id, total, customer_id } = reservationResult.rows[0];
 
-    await writePool.query('DELETE FROM reservations WHERE id = $1', [id]);
-
-    // Remettre la voiture en disponible
-    await writePool.query('UPDATE cars SET available = 1 WHERE id = $1', [car_id]);
-
-    // Mettre à jour le client
-    await writePool.query(
+    await pool.query('DELETE FROM reservations WHERE id = $1', [id]);
+    await pool.query('UPDATE cars SET available = 1, reservations_count = reservations_count - 1 WHERE id = $1', [car_id]);
+    await pool.query(
       'UPDATE customers SET reservations_count = reservations_count - 1, total_spent = total_spent - $1 WHERE id = $2',
       [total, customer_id]
     );
-
     res.json({ message: 'Réservation supprimée avec succès', deletedReservation: { id } });
   } catch (err) {
     console.error('Erreur lors de la suppression de la réservation :', err);
@@ -395,13 +372,12 @@ app.delete('/api/reservations/:id', async (req, res) => {
   }
 });
 
-
 // --- Settings Endpoints ---
 app.get('/api/settings', async (req, res) => {
   try {
-    const result = await readPool.query('SELECT * FROM settings WHERE id = 1');
+    const result = await pool.query('SELECT * FROM settings WHERE id = 1');
     if (result.rows.length === 0) {
-      const defaultSettings = {
+      return res.json({
         site_name: 'Luxury Drive',
         phone: '212000000',
         contact_email: 'admin@luxurydrive.com',
@@ -410,16 +386,9 @@ app.get('/api/settings', async (req, res) => {
         adress: 'adress',
         gps: 'gps',
         maintenance_mode: 0,
-        password: await bcrypt.hash('admin123', 10) // Hash default password
-      };
-      await writePool.query(
-        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
-        [defaultSettings.site_name, defaultSettings.phone, defaultSettings.contact_email, defaultSettings.facebook, defaultSettings.instagram, defaultSettings.adress, defaultSettings.gps, defaultSettings.maintenance_mode, defaultSettings.password]
-      );
-      res.json(defaultSettings);
-    } else {
-      res.json(result.rows[0]);
+      });
     }
+    res.json(result.rows[0]);
   } catch (err) {
     console.error('Erreur lors de la récupération des paramètres :', err);
     res.status(500).json({ error: 'Échec de la récupération des paramètres' });
@@ -427,27 +396,19 @@ app.get('/api/settings', async (req, res) => {
 });
 
 app.put('/api/settings', async (req, res) => {
-  const { site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password } = req.body;
+  const { site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode } = req.body;
   try {
-    let hashedPassword = password;
-    if (password) {
-      hashedPassword = await bcrypt.hash(password, 10); // Hash the new password
-    } else {
-      const existingSettings = await readPool.query('SELECT password FROM settings WHERE id = 1');
-      hashedPassword = existingSettings.rows[0]?.password; // Keep existing password if not provided
-    }
-
-    const result = await readPool.query('SELECT * FROM settings WHERE id = 1');
+    const result = await pool.query('SELECT * FROM settings WHERE id = 1');
     if (result.rows.length > 0) {
-      const { rows } = await writePool.query(
-        'UPDATE settings SET site_name = $1, phone = $2, contact_email = $3, facebook = $4, instagram = $5, adress = $6, gps = $7, maintenance_mode = $8, password = $9 WHERE id = 1 RETURNING *',
-        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0, hashedPassword]
+      const { rows } = await pool.query(
+        'UPDATE settings SET site_name = $1, phone = $2, contact_email = $3, facebook = $4, instagram = $5, adress = $6, gps = $7, maintenance_mode = $8 WHERE id = 1 RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0]
       );
       res.json(rows[0]);
     } else {
-      const { rows } = await writePool.query(
-        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
-        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0, hashedPassword]
+      const { rows } = await pool.query(
+        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0]
       );
       res.json(rows[0]);
     }
@@ -457,31 +418,10 @@ app.put('/api/settings', async (req, res) => {
   }
 });
 
-app.post('/api/verify-password', async (req, res) => {
-  const { password } = req.body;
-  if (!password) {
-    return res.status(400).json({ error: 'Mot de passe requis' });
-  }
-  try {
-    const result = await readPool.query('SELECT password FROM settings WHERE id = 1');
-    if (result.rows.length === 0) {
-      const defaultHashedPassword = await bcrypt.hash('admin123', 10);
-      const isMatch = await bcrypt.compare(password, defaultHashedPassword);
-      return res.json({ isValid: isMatch });
-    }
-    const storedPassword = result.rows[0].password;
-    const isMatch = await bcrypt.compare(password, storedPassword);
-    res.json({ isValid: isMatch });
-  } catch (err) {
-    console.error('Erreur lors de la vérification du mot de passe :', err);
-    res.status(500).json({ error: 'Échec de la vérification du mot de passe' });
-  }
-});
-
 // --- Testimonials Endpoints ---
 app.get('/api/testimonials', async (req, res) => {
   try {
-    const result = await readPool.query('SELECT * FROM testimonials ORDER BY created_at DESC');
+    const result = await pool.query('SELECT * FROM testimonials ORDER BY created_at DESC');
     res.json(result.rows);
   } catch (err) {
     console.error('Erreur lors de la récupération des témoignages :', err);
@@ -495,7 +435,7 @@ app.post('/api/testimonials', async (req, res) => {
     return res.status(400).json({ error: 'Tous les champs sont requis' });
   }
   try {
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'INSERT INTO testimonials (name, role, content, rating) VALUES ($1, $2, $3, $4) RETURNING *',
       [name, role, content, rating]
     );
@@ -513,7 +453,7 @@ app.put('/api/testimonials/:id', async (req, res) => {
     return res.status(400).json({ error: 'Tous les champs sont requis' });
   }
   try {
-    const { rows } = await writePool.query(
+    const { rows } = await pool.query(
       'UPDATE testimonials SET name = $1, role = $2, content = $3, rating = $4 WHERE id = $5 RETURNING *',
       [name, role, content, rating, id]
     );
@@ -528,7 +468,7 @@ app.put('/api/testimonials/:id', async (req, res) => {
 app.delete('/api/testimonials/:id', async (req, res) => {
   const id = req.params.id;
   try {
-    const { rowCount } = await writePool.query('DELETE FROM testimonials WHERE id = $1', [id]);
+    const { rowCount } = await pool.query('DELETE FROM testimonials WHERE id = $1', [id]);
     if (rowCount === 0) return res.status(404).json({ error: 'Témoignage non trouvé' });
     res.json({ message: 'Témoignage supprimé avec succès', deletedId: id });
   } catch (err) {
@@ -537,5 +477,16 @@ app.delete('/api/testimonials/:id', async (req, res) => {
   }
 });
 
-// Export pour Vercel (pas de app.listen dans un environnement serverless)
-module.exports = app;
+// Démarrer le serveur
+const port = process.env.PORT || 5000;
+app.listen(port, () => {
+  console.log(`Serveur démarré sur le port ${port} (Neon PostgreSQL)`);
+});
+
+// Fermeture propre
+process.on('SIGINT', async () => {
+  await pool.end();
+  await pool.end();
+  console.log('Connexions aux bases de données Neon fermées.');
+  process.exit(0);
+});
