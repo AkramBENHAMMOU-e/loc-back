@@ -6,6 +6,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cloudinary = require('cloudinary').v2;
+const bcrypt = require('bcrypt'); // Added for password hashing
 
 const app = express();
 
@@ -16,12 +17,12 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Connexion à Neon (PostgreSQL) - Deux pools
 const writePool = new Pool({
-  connectionString: process.env.DATABASE_URL_WRITE || process.env.DATABASE_URL, // URL pour écriture
+  connectionString: "postgresql://neondb_owner:npg_cuRmE4B0TJGP@ep-polished-dew-a8xrb7u0-pooler.eastus2.azure.neon.tech/neondb?sslmode=require",
   ssl: { rejectUnauthorized: false },
 });
 
 const readPool = new Pool({
-  connectionString: process.env.DATABASE_URL_READ || process.env.DATABASE_URL, // URL pour lecture
+  connectionString: "postgresql://neondb_owner:npg_cuRmE4B0TJGP@ep-little-water-a8i3hzze-pooler.eastus2.azure.neon.tech/neondb?sslmode=require",
   ssl: { rejectUnauthorized: false },
 });
 
@@ -32,7 +33,7 @@ cloudinary.config({
   api_secret: 'obQzDBDjB8qswwwSKJtYbL7f-S4',
 });
 
-// Création des tables dans Neon (utilise writePool car c'est une écriture)
+// Création des tables dans Neon
 const createTables = async () => {
   try {
     await writePool.query(`
@@ -79,8 +80,8 @@ const createTables = async () => {
         instagram TEXT,
         adress TEXT,
         gps TEXT,
-        password TEXT,
-        maintenance_mode INTEGER
+        maintenance_mode INTEGER,
+        password TEXT -- Fixed comma issue
       );
       CREATE TABLE IF NOT EXISTS testimonials (
         id SERIAL PRIMARY KEY,
@@ -91,6 +92,18 @@ const createTables = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // Insert default settings if not exists
+    const settingsCheck = await readPool.query('SELECT * FROM settings WHERE id = 1');
+    if (settingsCheck.rows.length === 0) {
+      const hashedPassword = await bcrypt.hash('admin123', 10); // Hash default password
+      await writePool.query(
+        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)',
+        [1, 'Luxury Drive', '212000000', 'admin@luxurydrive.com', 'facebook.com', 'instagram.com', 'adress', 'gps', 0, hashedPassword]
+      );
+      console.log('Default settings inserted with hashed password.');
+    }
+
     console.log('Tables créées avec succès dans Neon.');
   } catch (err) {
     console.error('Erreur lors de la création des tables :', err);
@@ -383,7 +396,7 @@ app.get('/api/settings', async (req, res) => {
   try {
     const result = await readPool.query('SELECT * FROM settings WHERE id = 1');
     if (result.rows.length === 0) {
-      return res.json({
+      const defaultSettings = {
         site_name: 'Luxury Drive',
         phone: '212000000',
         contact_email: 'admin@luxurydrive.com',
@@ -391,11 +404,17 @@ app.get('/api/settings', async (req, res) => {
         instagram: 'instagram.com',
         adress: 'adress',
         gps: 'gps',
-        password: 'admin123',
         maintenance_mode: 0,
-      });
+        password: await bcrypt.hash('admin123', 10) // Hash default password
+      };
+      await writePool.query(
+        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
+        [defaultSettings.site_name, defaultSettings.phone, defaultSettings.contact_email, defaultSettings.facebook, defaultSettings.instagram, defaultSettings.adress, defaultSettings.gps, defaultSettings.maintenance_mode, defaultSettings.password]
+      );
+      res.json(defaultSettings);
+    } else {
+      res.json(result.rows[0]);
     }
-    res.json(result.rows[0]);
   } catch (err) {
     console.error('Erreur lors de la récupération des paramètres :', err);
     res.status(500).json({ error: 'Échec de la récupération des paramètres' });
@@ -403,25 +422,54 @@ app.get('/api/settings', async (req, res) => {
 });
 
 app.put('/api/settings', async (req, res) => {
-  const { site_name, phone, contact_email, facebook, instagram, adress, gps,password, maintenance_mode } = req.body;
+  const { site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password } = req.body;
   try {
+    let hashedPassword = password;
+    if (password) {
+      hashedPassword = await bcrypt.hash(password, 10); // Hash the new password
+    } else {
+      const existingSettings = await readPool.query('SELECT password FROM settings WHERE id = 1');
+      hashedPassword = existingSettings.rows[0]?.password; // Keep existing password if not provided
+    }
+
     const result = await readPool.query('SELECT * FROM settings WHERE id = 1');
     if (result.rows.length > 0) {
       const { rows } = await writePool.query(
-        'UPDATE settings SET site_name = $1, phone = $2, contact_email = $3, facebook = $4, instagram = $5, adress = $6, gps = $7, maintenance_mode = $8,password = $9 WHERE id = 1 RETURNING *',
-        [site_name, phone, contact_email, facebook, instagram, adress, gps,password, maintenance_mode ? 1 : 0]
+        'UPDATE settings SET site_name = $1, phone = $2, contact_email = $3, facebook = $4, instagram = $5, adress = $6, gps = $7, maintenance_mode = $8, password = $9 WHERE id = 1 RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0, hashedPassword]
       );
       res.json(rows[0]);
     } else {
       const { rows } = await writePool.query(
-        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps,password, maintenance_mode) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
-        [site_name, phone, contact_email, facebook, instagram, adress, gps,password, maintenance_mode ? 1 : 0]
+        'INSERT INTO settings (id, site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode, password) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
+        [site_name, phone, contact_email, facebook, instagram, adress, gps, maintenance_mode ? 1 : 0, hashedPassword]
       );
       res.json(rows[0]);
     }
   } catch (err) {
     console.error('Erreur lors de la mise à jour des paramètres :', err);
     res.status(500).json({ error: 'Échec de la mise à jour des paramètres' });
+  }
+});
+
+app.post('/api/verify-password', async (req, res) => {
+  const { password } = req.body;
+  if (!password) {
+    return res.status(400).json({ error: 'Mot de passe requis' });
+  }
+  try {
+    const result = await readPool.query('SELECT password FROM settings WHERE id = 1');
+    if (result.rows.length === 0) {
+      const defaultHashedPassword = await bcrypt.hash('admin123', 10);
+      const isMatch = await bcrypt.compare(password, defaultHashedPassword);
+      return res.json({ isValid: isMatch });
+    }
+    const storedPassword = result.rows[0].password;
+    const isMatch = await bcrypt.compare(password, storedPassword);
+    res.json({ isValid: isMatch });
+  } catch (err) {
+    console.error('Erreur lors de la vérification du mot de passe :', err);
+    res.status(500).json({ error: 'Échec de la vérification du mot de passe' });
   }
 });
 
